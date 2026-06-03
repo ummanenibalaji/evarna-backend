@@ -1,0 +1,42 @@
+{
+  "name": "whisper-backend",
+  "version": "1.0.0",
+  "description": "Whisper AI companion backend — Phase 1",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon --exec tsx src/server.ts",
+    "voice-worker": "tsx src/workers/voice.worker.ts dev",
+    "voice-worker:prod": "tsx src/workers/voice.worker.ts start",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@deepgram/sdk": "^4.11.3",
+    "@fastify/cors": "^10",
+    "@fastify/websocket": "^11",
+    "@livekit/agents": "^1.4.4",
+    "@livekit/agents-plugin-deepgram": "^1.4.4",
+    "@livekit/agents-plugin-openai": "^1.4.4",
+    "@livekit/agents-plugin-silero": "^1.4.4",
+    "@livekit/rtc-node": "^0.13.29",
+    "@types/ws": "^8.18.1",
+    "bullmq": "^5",
+    "dotenv": "^16",
+    "fastify": "^5",
+    "hume": "^0.15.17",
+    "ioredis": "^5",
+    "livekit-server-sdk": "^2.15.3",
+    "mongoose": "^8",
+    "openai": "^4",
+    "pino": "^9",
+    "ws": "^8.21.0",
+    "zod": "^3"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "nodemon": "^3",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
