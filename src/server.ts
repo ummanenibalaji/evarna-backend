@@ -2,7 +2,7 @@ import "dotenv/config";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { env } from "./config/env.js";
-import { connectDatabase } from "./config/database.js";
+import { connectDatabase, checkVectorSearchIndex } from "./config/database.js";
 import { connectRedis } from "./config/redis.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { logger } from "./utils/logger.js";
@@ -40,6 +40,7 @@ await app.register(voiceRoutes, { prefix: "/api/v1/voice" });
 async function start(): Promise<void> {
   await connectDatabase();
   await connectRedis();
+  void checkVectorSearchIndex();
   startMemoryWorker();
   startStaleSessionCleanup();
 

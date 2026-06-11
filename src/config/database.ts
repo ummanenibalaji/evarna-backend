@@ -36,3 +36,55 @@ export async function connectDatabase(): Promise<void> {
 export async function disconnectDatabase(): Promise<void> {
   await mongoose.disconnect();
 }
+
+// Call this after connectDatabase() to warn loudly if the Atlas Vector Search
+// index is missing. Without it, memory retrieval silently returns empty results
+// on every turn and the entire memory moat is dead.
+export async function checkVectorSearchIndex(): Promise<void> {
+  const INDEX_NAME = "memory_vector_index";
+  const COLLECTION = "memories";
+
+  try {
+    const db = mongoose.connection.db;
+    if (!db) {
+      logger.warn("checkVectorSearchIndex: db not available yet — skipping");
+      return;
+    }
+
+    // listSearchIndexes() is Atlas-only; on local MongoDB it may throw.
+    const indexes = await db.collection(COLLECTION).listSearchIndexes().toArray();
+    const idx = indexes.find((i) => i.name === INDEX_NAME);
+
+    if (!idx) {
+      logger.warn(
+        `\n${"=".repeat(70)}\n` +
+        `⚠️  ATLAS VECTOR SEARCH INDEX "${INDEX_NAME}" NOT FOUND\n` +
+        `   Memory retrieval will silently return empty on every conversation.\n` +
+        `   The memory moat is DISABLED until you create this index.\n\n` +
+        `   Fix: Atlas UI → your cluster → Search → Create Search Index\n` +
+        `        Collection: ${COLLECTION} | Index name: ${INDEX_NAME}\n` +
+        `        See README §4 for the exact JSON definition.\n` +
+        `${"=".repeat(70)}`
+      );
+      return;
+    }
+
+    if (idx.status !== "READY") {
+      logger.warn(
+        { status: idx.status as string },
+        `Atlas Vector Search index "${INDEX_NAME}" exists but status is ${String(idx.status)} — memory retrieval may fail until it becomes READY`
+      );
+      return;
+    }
+
+    logger.info(`Atlas Vector Search index "${INDEX_NAME}" is READY — memory retrieval active`);
+  } catch (err) {
+    // Non-Atlas MongoDB (local dev without Atlas) will throw "not supported".
+    // Downgrade to a warning so the server still starts.
+    logger.warn(
+      { err },
+      `Could not verify Atlas Vector Search index "${INDEX_NAME}" — ` +
+      "this is expected on local/non-Atlas MongoDB. Memory retrieval may fail on Atlas if the index is missing."
+    );
+  }
+}

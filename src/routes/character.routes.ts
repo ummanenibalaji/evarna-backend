@@ -31,7 +31,10 @@ export async function characterRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const character = await createCompanion(parsed.data);
-      return reply.status(201).send({ success: true, data: character });
+      return reply.status(201).send({
+        success: true,
+        data: { character_id: character._id.toString(), ...character },
+      });
     } catch (err) {
       if (err instanceof CompanionValidationError) {
         return reply.status(400).send({
