@@ -34,4 +34,5 @@ export interface OnboardRequest {
 export interface OnboardResponse {
   user_id: string;
   character_id: string;
+  is_minor: boolean;
 }

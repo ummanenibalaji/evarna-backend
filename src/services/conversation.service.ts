@@ -69,7 +69,7 @@ async function getUserPersonalization(
 ): Promise<UserPersonalizationContext | null> {
   try {
     const user = await User.findById(userId)
-      .select("display_name gender communication_style")
+      .select("display_name gender communication_style is_minor")
       .lean();
     if (!user) return null;
 
@@ -78,6 +78,7 @@ async function getUserPersonalization(
       gender: user.gender as UserGender,
       communicationStyle: user.communication_style as CommunicationStyle,
       personalitySliders,
+      isMinor: user.is_minor,
     };
   } catch (err) {
     logger.error({ err, userId }, "Failed to fetch user for personalization — proceeding without it");

@@ -94,6 +94,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       const response: OnboardResponse = {
         user_id: user._id.toString(),
         character_id: character._id.toString(),
+        is_minor: isMinor,
       };
 
       return reply.status(201).send({ success: true, data: response });

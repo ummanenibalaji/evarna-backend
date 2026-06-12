@@ -83,11 +83,19 @@ export async function createCompanion(
   if (!Types.ObjectId.isValid(input.user_id)) {
     throw new CompanionValidationError("user_id", "user_id is not a valid id");
   }
-  const userExists = await User.exists({ _id: input.user_id });
-  if (!userExists) {
+  const user = await User.findById(input.user_id).select("is_minor").lean();
+  if (!user) {
     throw new CompanionValidationError(
       "user_id",
       "user_id does not reference an existing user",
+    );
+  }
+
+  // FIX 19: partner archetype is age-restricted (relationship dynamics)
+  if (user.is_minor && input.archetype === "partner") {
+    throw new CompanionValidationError(
+      "archetype",
+      "Partner companion is not available for users under 18",
     );
   }
 

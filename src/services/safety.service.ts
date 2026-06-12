@@ -15,6 +15,16 @@ const SAFE_DEFAULT: ModerationResult = {
   is_crisis: false,
 };
 
+// FIX 20: When the moderation API is unreachable we cannot determine whether
+// the message is a crisis. Fail safe — show crisis resources rather than risk
+// missing a real one.
+const CRISIS_FAIL_SAFE: ModerationResult = {
+  flagged: false,
+  categories: {},
+  category_scores: {},
+  is_crisis: true,
+};
+
 export async function checkModeration(text: string): Promise<ModerationResult> {
   try {
     const openai = getOpenAI();
@@ -33,8 +43,8 @@ export async function checkModeration(text: string): Promise<ModerationResult> {
 
     return { flagged: result.flagged, categories, category_scores, is_crisis };
   } catch (err) {
-    logger.error({ err }, "Moderation API error — returning safe default");
-    return SAFE_DEFAULT;
+    logger.error({ err }, "Moderation API error — failing safe (assuming possible crisis)");
+    return CRISIS_FAIL_SAFE;
   }
 }
 

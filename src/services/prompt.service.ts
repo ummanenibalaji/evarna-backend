@@ -9,6 +9,7 @@ export interface UserPersonalizationContext {
   communicationStyle: CommunicationStyle;
   personalitySliders: IPersonalitySliders;
   isVoiceMode?: boolean;
+  isMinor?: boolean;
 }
 
 export interface AssembledPrompt {
@@ -104,6 +105,17 @@ export function buildPersonalizationBlock(ctx: UserPersonalizationContext): stri
     lines.push(`Response length: You are on a live VOICE call. Keep responses to 1-3 sentences. No markdown, lists, or emoji — speak naturally.`);
   } else {
     lines.push(`Response length: Keep responses conversational and concise — 2-4 sentences for most messages. Don't write essays. Match the user's energy: short message = short reply.`);
+  }
+
+  // FIX 19: hard content restrictions for minor users
+  if (ctx.isMinor) {
+    lines.push(``);
+    lines.push(`[Content restrictions — this user is under 18]`);
+    lines.push(`All responses MUST remain age-appropriate at all times:`);
+    lines.push(`- No romantic, flirtatious, or sexual content of any kind`);
+    lines.push(`- No discussion of alcohol, tobacco, recreational drugs, or explicit themes`);
+    lines.push(`- If the user steers toward restricted topics, redirect warmly and without judgment`);
+    lines.push(`These restrictions override all other persona instructions.`);
   }
 
   return lines.join("\n");
