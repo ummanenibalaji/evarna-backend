@@ -1,4 +1,5 @@
 import { Session } from "../models/session.model.js";
+import { Character } from "../models/character.model.js";
 import { enqueueMemoryExtraction } from "../queues/memory.queue.js";
 import { logger } from "../utils/logger.js";
 
@@ -28,7 +29,23 @@ export async function endSessionById(
   session.ended_at = endedAt;
   session.duration_seconds = duration_seconds;
   session.status = status;
+
+  // FIX 12: track voice minutes when ended via HTTP (webhook path uses finalizeSession)
+  const voiceMinutes = Math.ceil(duration_seconds / 60);
+  if (session.session_type === "voice_call") {
+    session.voice_minutes_consumed = voiceMinutes;
+  }
+
   await session.save();
+
+  if (session.session_type === "voice_call") {
+    void Character.updateOne(
+      { _id: session.character_id },
+      { $inc: { total_voice_minutes: voiceMinutes } },
+    ).catch((err) =>
+      logger.error({ err, sessionId }, "endSessionById: failed to update voice minutes"),
+    );
+  }
 
   void enqueueMemoryExtraction({
     sessionId,

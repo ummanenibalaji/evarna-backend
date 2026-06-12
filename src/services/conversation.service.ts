@@ -259,6 +259,12 @@ export async function* streamConversation(
     tokensUsed, modResult, latency_ms, assistantTurnId
   ).catch((err) => logger.error({ err }, "Failed to persist conversation turns"));
 
+  // FIX 11 + 13: update Character.last_interaction_at and User.last_active_at
+  void Promise.all([
+    Character.updateOne({ _id: characterId }, { last_interaction_at: new Date() }),
+    User.updateOne({ _id: userId }, { last_active_at: new Date() }),
+  ]).catch((err) => logger.error({ err }, "Failed to update interaction timestamps"));
+
   // 8. Update Redis session context
   void (async () => {
     await appendTurn(sessionId, "user", message);

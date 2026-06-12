@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { Types } from "mongoose";
 import { Session } from "../models/session.model.js";
+import { Character } from "../models/character.model.js";
 import { initSessionContext } from "../services/session-context.service.js";
 import { endSessionById } from "../services/session.service.js";
 import { logger } from "../utils/logger.js";
@@ -44,6 +45,12 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     });
 
     await initSessionContext(session._id.toString());
+
+    // FIX 12: track engagement counts
+    void Character.updateOne(
+      { _id: new Types.ObjectId(character_id) },
+      { $inc: { total_sessions: 1 } },
+    ).catch((err) => logger.error({ err }, "Failed to increment character total_sessions"));
 
     return reply.status(201).send({
       success: true,

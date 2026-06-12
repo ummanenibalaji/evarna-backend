@@ -55,6 +55,12 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     const sessionId = session._id.toString();
     await initSessionContext(sessionId);
 
+    // FIX 12: track engagement counts
+    void Character.updateOne(
+      { _id: new Types.ObjectId(character_id) },
+      { $inc: { total_sessions: 1 } },
+    ).catch((err) => logger.error({ err }, "Voice: failed to increment character total_sessions"));
+
     try {
       const { token, livekit_url, room_name } = await generateRoomToken({
         roomName: sessionId,
@@ -131,9 +137,16 @@ async function finalizeSession(sessionId: string): Promise<void> {
   );
   session.ended_at = endedAt;
   session.duration_seconds = duration_seconds;
-  session.voice_minutes_consumed = Math.ceil(duration_seconds / 60);
+  const voiceMinutes = Math.ceil(duration_seconds / 60);
+  session.voice_minutes_consumed = voiceMinutes;
   session.status = "completed";
   await session.save();
+
+  // FIX 12: accumulate voice usage on the character
+  void Character.updateOne(
+    { _id: session.character_id },
+    { $inc: { total_voice_minutes: voiceMinutes } },
+  ).catch((err) => logger.error({ err, sessionId }, "Webhook: failed to update character voice minutes"));
 
   void enqueueMemoryExtraction({
     sessionId: session._id.toString(),
