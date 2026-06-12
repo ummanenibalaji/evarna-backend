@@ -9,6 +9,7 @@ import { Character } from "../models/character.model.js";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 import { DEFAULT_VOICE_ID } from "../data/voices.js";
+import { HumeTTS } from "./hume-tts-plugin.js";
 
 const FALLBACK_PROMPT =
   "You are a warm, supportive AI companion. Speak naturally and conversationally, " +
@@ -57,7 +58,7 @@ async function resolveVoiceConfig(
 /**
  * Runs one voice call: subscribes to the caller's mic, transcribes with Deepgram,
  * generates replies with OpenAI using the character's persona, and speaks back
- * with OpenAI TTS. Voice activity detection (Silero) handles turn-taking.
+ * with Hume Octave 2 TTS using the user's selected voice.
  *
  * Called by the LiveKit agent worker (voice.worker.ts) once per room the agent
  * is dispatched to.
@@ -70,11 +71,14 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
 
   logger.info({ roomName, voiceId }, "voice: starting agent session");
 
+  const humeTts = env.HUME_API_KEY
+    ? new HumeTTS(voiceId)
+    : new openai.TTS({ model: "tts-1", voice: "shimmer", apiKey: env.OPENAI_API_KEY });
+
   const session = new voice.AgentSession({
     stt: new deepgram.STT({ model: "nova-2", apiKey: env.DEEPGRAM_API_KEY }),
     llm: new openai.LLM({ model: "gpt-4o-mini", apiKey: env.OPENAI_API_KEY }),
-    // TODO(1B): replace with Hume Octave 2 using voiceId
-    tts: new openai.TTS({ model: "tts-1", voice: "shimmer", apiKey: env.OPENAI_API_KEY }),
+    tts: humeTts,
     vad: await silero.VAD.load(),
   });
 
@@ -85,5 +89,5 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   // Open with a spoken greeting so the user hears the companion immediately.
   session.generateReply({ instructions: greeting });
 
-  logger.info({ roomName, voiceId }, "voice: agent session started");
+  logger.info({ roomName, voiceId, ttsProvider: env.HUME_API_KEY ? "hume" : "openai-fallback" }, "voice: agent session started");
 }

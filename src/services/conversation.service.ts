@@ -1,6 +1,7 @@
 import { Types } from "mongoose";
 import { getOpenAI, MODELS } from "../config/openai.js";
 import { Character } from "../models/character.model.js";
+import { User } from "../models/user.model.js";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { checkModeration, getCrisisResponse } from "./safety.service.js";
 import {
@@ -10,14 +11,16 @@ import {
   getCachedCharacterConfig,
 } from "./session-context.service.js";
 import { assemblePrompt } from "./prompt.service.js";
+import type { UserPersonalizationContext } from "./prompt.service.js";
 import { compressIfNeeded } from "./context-compression.service.js";
 import { retrieveMemories } from "./memory-retrieval.service.js";
 import { getLatestUsageSummary, formatUsageSummary } from "./memory-summary.service.js";
 import { approximateTokens } from "../utils/token-counter.js";
 import { logger } from "../utils/logger.js";
-import type { IPersonaConfig } from "../types/character.types.js";
+import type { IPersonaConfig, IPersonalitySliders } from "../types/character.types.js";
 import type { IRedisSessionContext } from "../types/prompt.types.js";
 import type { ModerationResult } from "./safety.service.js";
+import type { UserGender, CommunicationStyle } from "../types/user.types.js";
 
 export interface ConversationParams {
   sessionId: string;
@@ -34,15 +37,52 @@ export type ConversationEvent =
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-async function getPersonaConfig(characterId: string): Promise<IPersonaConfig> {
-  const cached = await getCachedCharacterConfig(characterId);
-  if (cached) return cached as IPersonaConfig;
+// Cache includes persona_config + personality_sliders so we never need to hit
+// MongoDB per-turn for character info.
+interface CachedCharacterConfig {
+  persona_config: IPersonaConfig;
+  personality_sliders: IPersonalitySliders;
+}
 
-  const character = await Character.findById(characterId).lean();
+async function getCharacterConfig(characterId: string): Promise<CachedCharacterConfig> {
+  const cached = await getCachedCharacterConfig(characterId);
+  if (cached) return cached as CachedCharacterConfig;
+
+  const character = await Character.findById(characterId)
+    .select("persona_config personality_sliders")
+    .lean();
   if (!character) throw new Error(`Character not found: ${characterId}`);
 
-  await cacheCharacterConfig(characterId, character.persona_config);
-  return character.persona_config;
+  const config: CachedCharacterConfig = {
+    persona_config: character.persona_config,
+    personality_sliders: character.personality_sliders,
+  };
+  await cacheCharacterConfig(characterId, config);
+  return config;
+}
+
+// Fetches the fields needed for prompt personalization. Returns null if the
+// user doesn't exist (shouldn't happen in prod, but fail open).
+async function getUserPersonalization(
+  userId: string,
+  personalitySliders: IPersonalitySliders,
+): Promise<UserPersonalizationContext | null> {
+  try {
+    const user = await User.findById(userId)
+      .select("display_name gender communication_style")
+      .lean();
+    if (!user) return null;
+
+    return {
+      name: user.display_name,
+      gender: user.gender as UserGender,
+      communicationStyle: user.communication_style as CommunicationStyle,
+      personalitySliders,
+    };
+  } catch (err) {
+    logger.error({ err, userId }, "Failed to fetch user for personalization — proceeding without it");
+    return null;
+  }
 }
 
 async function persistTurns(
@@ -107,10 +147,10 @@ export async function* streamConversation(
     total_token_count: 0,
   };
 
-  // Phase 1: all I/O in parallel — persona, session context, safety, memory, summary
-  const [personaConfig, rawSessionCtx, modResult, memoryBlock, latestSummary] =
+  // Phase 1: all I/O in parallel — character config, session context, safety, memory, summary
+  const [charConfig, rawSessionCtx, modResult, memoryBlock, latestSummary] =
     await Promise.all([
-      getPersonaConfig(characterId),
+      getCharacterConfig(characterId),
       getSessionContext(sessionId).then((ctx) => ctx ?? EMPTY_CTX),
       checkModeration(message),
       retrieveMemories(characterId, message).catch((err) => {
@@ -149,18 +189,22 @@ export async function* streamConversation(
   // 3. Context compression: if session context is over 3,500 tokens, compress oldest 10 turns
   const sessionCtx = await compressIfNeeded(sessionId, rawSessionCtx);
 
-  // 4. Assemble prompt: system + memory block + usage summary + session context + user message
+  // 4. Assemble prompt: system persona + personalization + memory + usage summary + context + message
   const usageSummaryText = latestSummary ? formatUsageSummary(latestSummary) : null;
 
+  // Fetch user personalization (name, pronouns, communication style, sliders)
+  const personalization = await getUserPersonalization(userId, charConfig.personality_sliders);
+
   const { messages, total_tokens } = assemblePrompt(
-    personaConfig.system_prompt,
+    charConfig.persona_config.system_prompt,
     sessionCtx,
     message,
     memoryBlock || null,
-    usageSummaryText
+    usageSummaryText,
+    personalization,
   );
 
-  // 5. Stream from LLM
+  // 5. Stream from LLM (temperature 0.8 for consistent persona)
   const openai = getOpenAI();
   const startTime = Date.now();
   const assistantTurnId = new Types.ObjectId();
@@ -173,6 +217,7 @@ export async function* streamConversation(
       model: MODELS.CONVERSATION,
       messages,
       stream: true,
+      temperature: 0.8,
       max_completion_tokens: 600,
       stream_options: { include_usage: true },
     });
