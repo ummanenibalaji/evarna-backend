@@ -21,10 +21,12 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: whisper-redis
+    container_name: evarna-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      # Published on 6380, not the default 6379, so this does not fight other
+      # projects on the same machine for the port. Set REDIS_URL to match.
+      - "6380:6379"
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data

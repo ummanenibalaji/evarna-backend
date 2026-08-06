@@ -1,13 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { Types } from "mongoose";
-import { WebhookReceiver } from "livekit-server-sdk";
-import { env } from "../config/env.js";
 import { Session } from "../models/session.model.js";
 import { Character } from "../models/character.model.js";
 import { initSessionContext } from "../services/session-context.service.js";
 import { generateRoomToken, LiveKitNotConfiguredError } from "../services/livekit-token.service.js";
-import { enqueueMemoryExtraction } from "../queues/memory.queue.js";
 import { WHISPER_VOICES } from "../data/voices.js";
 import { logger } from "../utils/logger.js";
 
@@ -89,70 +86,14 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  // POST /api/v1/voice/webhook — LiveKit Cloud sends room.finished and friends here
-  // Signed via LIVEKIT_API_SECRET; we verify with WebhookReceiver.
-  app.post("/webhook", { config: { rawBody: true } }, async (request, reply) => {
-    if (!env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) {
-      return reply
-        .status(503)
-        .send({ success: false, error: "LiveKit not configured", code: "LIVEKIT_NOT_CONFIGURED" });
-    }
-
-    const auth = request.headers.authorization;
-    const body =
-      typeof (request as unknown as { rawBody?: string }).rawBody === "string"
-        ? (request as unknown as { rawBody: string }).rawBody
-        : typeof request.body === "string"
-          ? request.body
-          : JSON.stringify(request.body);
-
-    const receiver = new WebhookReceiver(env.LIVEKIT_API_KEY, env.LIVEKIT_API_SECRET);
-
-    let event;
-    try {
-      event = await receiver.receive(body, auth);
-    } catch (err) {
-      logger.warn({ err }, "LiveKit webhook verification failed");
-      return reply.status(401).send({ success: false, error: "Invalid signature" });
-    }
-
-    if (event.event === "room_finished") {
-      const sessionId = event.room?.name;
-      if (sessionId && Types.ObjectId.isValid(sessionId)) {
-        await finalizeSession(sessionId);
-      }
-    }
-
-    return reply.send({ success: true });
-  });
-}
-
-async function finalizeSession(sessionId: string): Promise<void> {
-  const session = await Session.findById(sessionId);
-  if (!session || session.status !== "active") return;
-
-  const endedAt = new Date();
-  const duration_seconds = Math.floor(
-    (endedAt.getTime() - session.started_at.getTime()) / 1000
-  );
-  session.ended_at = endedAt;
-  session.duration_seconds = duration_seconds;
-  const voiceMinutes = Math.ceil(duration_seconds / 60);
-  session.voice_minutes_consumed = voiceMinutes;
-  session.status = "completed";
-  await session.save();
-
-  // FIX 12: accumulate voice usage on the character
-  void Character.updateOne(
-    { _id: session.character_id },
-    { $inc: { total_voice_minutes: voiceMinutes } },
-  ).catch((err) => logger.error({ err, sessionId }, "Webhook: failed to update character voice minutes"));
-
-  void enqueueMemoryExtraction({
-    sessionId: session._id.toString(),
-    characterId: session.character_id.toString(),
-    userId: session.user_id,
-  }).catch((err) =>
-    logger.error({ err, sessionId }, "Webhook fallback failed to enqueue memory extraction")
-  );
+  // NOTE: POST /api/v1/voice/webhook was removed.
+  //
+  // It never worked: verification needs the raw request body, which requires
+  // the `fastify-raw-body` plugin. That plugin was never installed, so
+  // `{ config: { rawBody: true } }` was inert, WebhookReceiver.receive() was
+  // handed a re-serialized body, and every call failed signature verification
+  // with a 401. Session finalization is now handled where it belongs — in the
+  // voice worker, on RoomEvent.ParticipantDisconnected / Disconnected (see
+  // voice.service.ts) — which is server-side and survives the app being killed.
+  // The 30-minute stale-session sweep remains the last-resort backstop.
 }

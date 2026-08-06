@@ -9,7 +9,10 @@
     "voice-worker:prod": "tsx src/workers/voice.worker.ts start",
     "build": "tsc",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:prompt": "tsx src/checks/prompt.check.ts",
+    "smoke": "tsx src/checks/smoke.ts",
+    "setup:db": "tsx src/scripts/setup-db.ts"
   },
   "dependencies": {
     "@deepgram/sdk": "^4.11.3",

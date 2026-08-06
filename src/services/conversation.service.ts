@@ -27,6 +27,13 @@ export interface ConversationParams {
   characterId: string;
   userId: string;
   message: string;
+  /**
+   * Set by the voice pipeline (voice-llm.service.ts). Switches the prompt's
+   * response-length guidance to speakable replies — no markdown, no lists,
+   * 1-3 sentences. buildPersonalizationBlock already handled this flag; before
+   * Phase 1 nothing ever set it because voice never used this pipeline.
+   */
+  isVoiceMode?: boolean;
 }
 
 export type ConversationEvent =
@@ -66,6 +73,7 @@ async function getCharacterConfig(characterId: string): Promise<CachedCharacterC
 async function getUserPersonalization(
   userId: string,
   personalitySliders: IPersonalitySliders,
+  isVoiceMode = false,
 ): Promise<UserPersonalizationContext | null> {
   try {
     const user = await User.findById(userId)
@@ -79,6 +87,7 @@ async function getUserPersonalization(
       communicationStyle: user.communication_style as CommunicationStyle,
       personalitySliders,
       isMinor: user.is_minor,
+      isVoiceMode,
     };
   } catch (err) {
     logger.error({ err, userId }, "Failed to fetch user for personalization — proceeding without it");
@@ -140,7 +149,7 @@ async function persistTurns(
 export async function* streamConversation(
   params: ConversationParams
 ): AsyncGenerator<ConversationEvent> {
-  const { sessionId, characterId, userId, message } = params;
+  const { sessionId, characterId, userId, message, isVoiceMode = false } = params;
 
   const EMPTY_CTX: IRedisSessionContext = {
     compressed_summary: "",
@@ -169,16 +178,21 @@ export async function* streamConversation(
     const crisis = getCrisisResponse();
     yield { type: "crisis", content: crisis };
 
+    // Awaited for the same reason as the normal path below — but it matters
+    // more here: a crisis exchange is a safety record, and the client may end
+    // the session immediately afterwards.
     const assistantTurnId = new Types.ObjectId();
-    void persistTurns(
-      sessionId, characterId, userId, message, crisis,
-      { input: 0, output: 0 }, modResult, 0, assistantTurnId
-    ).catch((err) => logger.error({ err }, "Failed to persist crisis turns"));
+    await Promise.all([
+      persistTurns(
+        sessionId, characterId, userId, message, crisis,
+        { input: 0, output: 0 }, modResult, 0, assistantTurnId,
+      ).catch((err) => logger.error({ err }, "Failed to persist crisis turns")),
 
-    void (async () => {
-      await appendTurn(sessionId, "user", message);
-      await appendTurn(sessionId, "assistant", crisis);
-    })().catch((err) => logger.error({ err }, "Failed to update Redis after crisis"));
+      (async () => {
+        await appendTurn(sessionId, "user", message);
+        await appendTurn(sessionId, "assistant", crisis);
+      })().catch((err) => logger.error({ err }, "Failed to update Redis after crisis")),
+    ]);
 
     return;
   }
@@ -194,10 +208,14 @@ export async function* streamConversation(
   const usageSummaryText = latestSummary ? formatUsageSummary(latestSummary) : null;
 
   // Fetch user personalization (name, pronouns, communication style, sliders)
-  const personalization = await getUserPersonalization(userId, charConfig.personality_sliders);
+  const personalization = await getUserPersonalization(
+    userId,
+    charConfig.personality_sliders,
+    isVoiceMode,
+  );
 
   const { messages, total_tokens } = assemblePrompt(
-    charConfig.persona_config.system_prompt,
+    charConfig.persona_config,
     sessionCtx,
     message,
     memoryBlock || null,
@@ -254,23 +272,37 @@ export async function* streamConversation(
     })
     .catch((err) => logger.error({ err }, "Output moderation check failed"));
 
-  // 7. Persist turns to MongoDB (non-blocking)
-  void persistTurns(
-    sessionId, characterId, userId, message, fullContent,
-    tokensUsed, modResult, latency_ms, assistantTurnId
-  ).catch((err) => logger.error({ err }, "Failed to persist conversation turns"));
+  // 7. Persist turns to MongoDB, and 8. update the Redis session context.
+  //
+  // These are AWAITED before `done` is emitted, deliberately. Both used to be
+  // fire-and-forget, which raced two things that follow immediately after:
+  //   - POST /sessions/:id/end enqueues memory extraction, and the extraction
+  //     job reads ConversationTurns. The client ends the session as soon as the
+  //     chat screen unmounts, so an unpersisted final exchange was silently
+  //     missing from memory extraction.
+  //   - the next turn reads the Redis context; if appendTurn hadn't landed, the
+  //     companion lost the immediately-preceding exchange.
+  // The user has already received every content chunk by this point, so `done`
+  // is only a terminator — paying a few ms here buys the guarantee that when a
+  // client sees `done`, the turn is durable and in context.
+  await Promise.all([
+    persistTurns(
+      sessionId, characterId, userId, message, fullContent,
+      tokensUsed, modResult, latency_ms, assistantTurnId,
+    ).catch((err) => logger.error({ err }, "Failed to persist conversation turns")),
 
+    (async () => {
+      await appendTurn(sessionId, "user", message);
+      await appendTurn(sessionId, "assistant", fullContent);
+    })().catch((err) => logger.error({ err }, "Failed to update Redis session context")),
+  ]);
+
+  // Cosmetic only — safe to let these settle after the stream closes.
   // FIX 11 + 13: update Character.last_interaction_at and User.last_active_at
   void Promise.all([
     Character.updateOne({ _id: characterId }, { last_interaction_at: new Date() }),
     User.updateOne({ _id: userId }, { last_active_at: new Date() }),
   ]).catch((err) => logger.error({ err }, "Failed to update interaction timestamps"));
-
-  // 8. Update Redis session context
-  void (async () => {
-    await appendTurn(sessionId, "user", message);
-    await appendTurn(sessionId, "assistant", fullContent);
-  })().catch((err) => logger.error({ err }, "Failed to update Redis session context"));
 
   yield {
     type: "done",

@@ -1,7 +1,7 @@
 import { Queue } from "bullmq";
 import { getBullMQConnection } from "../config/bullmq.js";
 
-export const MEMORY_QUEUE_NAME = "whisper-memory";
+export const MEMORY_QUEUE_NAME = "evarna-memory";
 
 export const JOB_NAMES = {
   EXTRACTION: "memory-extraction",

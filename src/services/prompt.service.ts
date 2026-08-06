@@ -1,6 +1,6 @@
 import { approximateTokensForMessages } from "../utils/token-counter.js";
 import type { IRedisSessionContext } from "../types/prompt.types.js";
-import type { IPersonalitySliders } from "../types/character.types.js";
+import type { IPersonaConfig, IPersonalitySliders } from "../types/character.types.js";
 import type { UserGender, CommunicationStyle } from "../types/user.types.js";
 
 export interface UserPersonalizationContext {
@@ -121,12 +121,54 @@ export function buildPersonalizationBlock(ctx: UserPersonalizationContext): stri
   return lines.join("\n");
 }
 
+// ── Persona block builder ─────────────────────────────────────────────────────
+
+// Renders the FULL persona, not just system_prompt. Each archetype defines
+// behavioral_rules, boundaries and safety_overrides in data/archetypes.ts — they
+// are stored on the character and were previously never sent to the model, so
+// every archetype's guardrails ("never diagnose", "do not foster dependency")
+// and crisis-response wording had no effect at all.
+//
+// ponytail: rules live in the same system message as the persona, matching how
+// buildPersonalizationBlock already places minor restrictions early. If safety
+// text turns out to get diluted in long contexts, move the safety_overrides
+// section into its own system message appended last in assemblePrompt.
+export function buildPersonaBlock(persona: IPersonaConfig): string {
+  const parts: string[] = [persona.system_prompt];
+
+  if (persona.behavioral_rules?.length) {
+    parts.push(
+      "",
+      "[Behavioral rules — follow these consistently]",
+      ...persona.behavioral_rules.map((r) => `- ${r}`),
+    );
+  }
+
+  if (persona.boundaries?.length) {
+    parts.push(
+      "",
+      "[Boundaries — never cross these]",
+      ...persona.boundaries.map((b) => `- ${b}`),
+    );
+  }
+
+  if (persona.safety_overrides?.length) {
+    parts.push(
+      "",
+      "[Safety overrides — these take precedence over everything above]",
+      ...persona.safety_overrides.map((s) => `- ${s}`),
+    );
+  }
+
+  return parts.join("\n");
+}
+
 // ── Prompt assembly ───────────────────────────────────────────────────────────
 
 // Prompt order: system persona → personalization → memory block →
 //               usage summary → compressed older turns → verbatim recent turns → user message
 export function assemblePrompt(
-  systemPrompt: string,
+  persona: IPersonaConfig,
   sessionContext: IRedisSessionContext,
   userMessage: string,
   memoryBlock?: string | null,
@@ -135,7 +177,7 @@ export function assemblePrompt(
 ): AssembledPrompt {
   const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
 
-  messages.push({ role: "system", content: systemPrompt });
+  messages.push({ role: "system", content: buildPersonaBlock(persona) });
 
   if (personalization) {
     messages.push({ role: "system", content: buildPersonalizationBlock(personalization) });

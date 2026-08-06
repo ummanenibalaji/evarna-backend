@@ -37,10 +37,38 @@ export async function disconnectDatabase(): Promise<void> {
   await mongoose.disconnect();
 }
 
-// Call this after connectDatabase() to warn loudly if the Atlas Vector Search
-// index is missing. Without it, memory retrieval silently returns empty results
-// on every turn and the entire memory moat is dead.
-export async function checkVectorSearchIndex(): Promise<void> {
+// ─── Atlas Vector Search index status ────────────────────────────────────────
+// Long-term memory recall depends entirely on this index. Without it,
+// $vectorSearch throws, retrieveMemories() swallows the error, and every
+// conversation runs with no memory — with no user-visible symptom. So the
+// status is recorded here and surfaced on GET /health rather than being
+// buried in a startup log line nobody reads.
+
+export type VectorIndexStatus =
+  | "ready"        // index exists and is queryable — memory recall works
+  | "not_ready"    // index exists but is still building — recall fails for now
+  | "missing"      // index absent — recall is dead until it is created
+  | "unverified";  // could not check (non-Atlas MongoDB, or db not up yet)
+
+// The mongo driver types listSearchIndexes() as { name: string }, but Atlas
+// also returns status/queryable. Widen it rather than reaching past the types.
+interface SearchIndexInfo {
+  name?: string;
+  status?: string;
+  queryable?: boolean;
+}
+
+let vectorIndexStatus: VectorIndexStatus = "unverified";
+
+export function getVectorIndexStatus(): VectorIndexStatus {
+  return vectorIndexStatus;
+}
+
+// Call this after connectDatabase(). In production a missing index is fatal:
+// better to refuse to boot than to serve a companion that has quietly lost its
+// memory. A still-building index is transient, so it only warns (exiting there
+// would crash-loop for the duration of the index build).
+export async function checkVectorSearchIndex(): Promise<VectorIndexStatus> {
   const INDEX_NAME = "memory_vector_index";
   const COLLECTION = "memories";
 
@@ -48,15 +76,20 @@ export async function checkVectorSearchIndex(): Promise<void> {
     const db = mongoose.connection.db;
     if (!db) {
       logger.warn("checkVectorSearchIndex: db not available yet — skipping");
-      return;
+      vectorIndexStatus = "unverified";
+      return vectorIndexStatus;
     }
 
     // listSearchIndexes() is Atlas-only; on local MongoDB it may throw.
-    const indexes = await db.collection(COLLECTION).listSearchIndexes().toArray();
+    const indexes = (await db
+      .collection(COLLECTION)
+      .listSearchIndexes()
+      .toArray()) as SearchIndexInfo[];
     const idx = indexes.find((i) => i.name === INDEX_NAME);
 
     if (!idx) {
-      logger.warn(
+      vectorIndexStatus = "missing";
+      logger.error(
         `\n${"=".repeat(70)}\n` +
         `⚠️  ATLAS VECTOR SEARCH INDEX "${INDEX_NAME}" NOT FOUND\n` +
         `   Memory retrieval will silently return empty on every conversation.\n` +
@@ -66,25 +99,35 @@ export async function checkVectorSearchIndex(): Promise<void> {
         `        See README §4 for the exact JSON definition.\n` +
         `${"=".repeat(70)}`
       );
-      return;
+      if (env.NODE_ENV === "production") {
+        logger.error("Refusing to start in production without the vector search index");
+        process.exit(1);
+      }
+      return vectorIndexStatus;
     }
 
     if (idx.status !== "READY") {
+      vectorIndexStatus = "not_ready";
       logger.warn(
-        { status: idx.status as string },
-        `Atlas Vector Search index "${INDEX_NAME}" exists but status is ${String(idx.status)} — memory retrieval may fail until it becomes READY`
+        { status: idx.status ?? "unknown" },
+        `Atlas Vector Search index "${INDEX_NAME}" exists but status is ${idx.status ?? "unknown"} — memory retrieval will fail until it becomes READY`
       );
-      return;
+      return vectorIndexStatus;
     }
 
+    vectorIndexStatus = "ready";
     logger.info(`Atlas Vector Search index "${INDEX_NAME}" is READY — memory retrieval active`);
+    return vectorIndexStatus;
   } catch (err) {
     // Non-Atlas MongoDB (local dev without Atlas) will throw "not supported".
-    // Downgrade to a warning so the server still starts.
+    // Don't exit even in production — crashing over a driver quirk on an
+    // otherwise healthy database is worse than flagging it on /health.
+    vectorIndexStatus = "unverified";
     logger.warn(
       { err },
       `Could not verify Atlas Vector Search index "${INDEX_NAME}" — ` +
       "this is expected on local/non-Atlas MongoDB. Memory retrieval may fail on Atlas if the index is missing."
     );
+    return vectorIndexStatus;
   }
 }

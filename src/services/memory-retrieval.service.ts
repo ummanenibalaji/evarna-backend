@@ -141,12 +141,22 @@ export async function retrieveMemories(
       },
     ]);
   } catch (err) {
-    // Atlas Vector Search index may not exist yet — degrade gracefully
-    logger.warn({ err, characterId }, "Vector search failed — proceeding without memories");
+    // A throw here means the index is missing/building or Atlas rejected the
+    // query — a real fault that silently disables memory. Log at error level so
+    // it is distinguishable from the ordinary "this character has no memories
+    // yet" case below, which is not a problem at all.
+    logger.error(
+      { err, characterId, index: ATLAS_VECTOR_INDEX },
+      "Vector search FAILED — this turn ran with no long-term memory. Check GET /health vector_index.",
+    );
     return "";
   }
 
-  if (rawResults.length === 0) return "";
+  // Expected for a brand-new character, or when nothing is semantically close.
+  if (rawResults.length === 0) {
+    logger.debug({ characterId }, "Vector search returned no memories for this message");
+    return "";
+  }
 
   // 3. Re-rank: 0.6 × cosine_similarity + 0.4 × recency_decay
   const scored: ScoredMemory[] = rawResults

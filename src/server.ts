@@ -2,7 +2,11 @@ import "dotenv/config";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { env } from "./config/env.js";
-import { connectDatabase, checkVectorSearchIndex } from "./config/database.js";
+import {
+  connectDatabase,
+  checkVectorSearchIndex,
+  getVectorIndexStatus,
+} from "./config/database.js";
 import { connectRedis } from "./config/redis.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { logger } from "./utils/logger.js";
@@ -21,7 +25,14 @@ await app.register(cors, { origin: true });
 
 app.setErrorHandler(errorHandler);
 
-app.get("/health", async () => ({ status: "ok", ts: new Date().toISOString() }));
+// vector_index is reported here because a missing index disables long-term
+// memory with no other visible symptom. "ready" is the only value that means
+// memory recall actually works.
+app.get("/health", async () => ({
+  status: "ok",
+  ts: new Date().toISOString(),
+  vector_index: getVectorIndexStatus(),
+}));
 
 // Sprint 1
 await app.register(userRoutes, { prefix: "/api/v1/users" });
@@ -40,7 +51,9 @@ await app.register(voiceRoutes, { prefix: "/api/v1/voice" });
 async function start(): Promise<void> {
   await connectDatabase();
   await connectRedis();
-  void checkVectorSearchIndex();
+  // Awaited, not fire-and-forget: in production a missing index exits here,
+  // and /health must not report "unverified" just because we raced startup.
+  await checkVectorSearchIndex();
   startMemoryWorker();
   startStaleSessionCleanup();
 
