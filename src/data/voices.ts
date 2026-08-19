@@ -45,6 +45,27 @@ export const WHISPER_VOICES: WhisperVoice[] = [
   },
 ];
 
+/**
+ * The catalog/DB voice ids above are custom-voice UUIDs from the original Hume
+ * account, which the current account cannot access. They stay as stable
+ * internal keys (characters in Mongo reference them); this map translates them
+ * to voices the active Hume account can actually synthesize with.
+ */
+export const HUME_VOICE_MAP: Record<string, { id: string; provider: "HUME_AI" | "CUSTOM_VOICE" }> = {
+  // Kai → Colton Rivers
+  "944adf80-0d6e-4909-b6fa-078784d6f8c5": { id: "d8ab67c6-953d-4bd8-9370-8fa53a0f1453", provider: "HUME_AI" },
+  // Theo → Sebastian Lockwood
+  "3866d4e7-0188-4010-92be-836d927e84e0": { id: "522fc367-961f-4817-8929-81f433b4afe9", provider: "HUME_AI" },
+  // Maya → Ava Song
+  "c050bc97-0e14-44ba-8c23-ae353fee972d": { id: "5bb7de05-c8fe-426a-8fcc-ba4fc4ce9f9c", provider: "HUME_AI" },
+  // Iris → Relaxing ASMR Woman
+  "3cd1f2e8-12f0-48b5-ade4-9e06241b8252": { id: "aeaaf1f8-fe31-49ae-893d-c744e5207bc2", provider: "HUME_AI" },
+};
+
+export function resolveHumeVoice(voiceId: string): { id: string; provider: "HUME_AI" | "CUSTOM_VOICE" } {
+  return HUME_VOICE_MAP[voiceId] ?? { id: voiceId, provider: "CUSTOM_VOICE" };
+}
+
 export function getVoice(voiceId: string): WhisperVoice | undefined {
   return WHISPER_VOICES.find((v) => v.id === voiceId);
 }

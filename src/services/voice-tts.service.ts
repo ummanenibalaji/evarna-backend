@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
+import { resolveHumeVoice } from "../data/voices.js";
 
 export interface TTSAudioChunk {
   pcm: Int16Array;
@@ -19,7 +20,7 @@ const HUME_BASE_URL = "wss://api.hume.ai/v0/tts/stream/input";
 
 interface HumePublishTts {
   text?: string;
-  voice?: { id: string; provider: "CUSTOM_VOICE" };
+  voice?: { id: string; provider: "HUME_AI" | "CUSTOM_VOICE" };
   flush?: boolean;
   close?: boolean;
 }
@@ -47,11 +48,23 @@ export class HumeTTSSession {
   private connecting: Promise<void> | null = null;
   private permanentlyClosed = false;
   private firstChunkAt = 0;
+  // Set by cancelTurn() on barge-in. Hume keeps generating the abandoned turn,
+  // so its remaining chunks must be dropped rather than leaking into the next
+  // turn's audio. Cleared by beginTurn().
+  private discarding = false;
 
   constructor(
     private voiceId: string,
     private callbacks: TTSCallbacks
   ) {}
+
+  /**
+   * Rebind the audio/error sink. The socket outlives any single
+   * SynthesizeStream, so each new stream claims delivery for its own queue.
+   */
+  setCallbacks(callbacks: TTSCallbacks): void {
+    this.callbacks = callbacks;
+  }
 
   private isOpen(): boolean {
     return this.socket !== null && this.socket.readyState === WebSocket.OPEN;
@@ -108,14 +121,20 @@ export class HumeTTSSession {
 
     ws.on("message", (data: WebSocket.RawData) => {
       if (this.permanentlyClosed) return;
-      let msg: { type?: string; audio?: string; isLastChunk?: boolean };
+      let msg: { type?: string; audio?: string; isLastChunk?: boolean; is_last_chunk?: boolean };
       try {
         msg = JSON.parse(data.toString());
       } catch (err) {
         logger.warn({ err }, "Hume message parse failed");
         return;
       }
-      if (msg.type !== "audio" || typeof msg.audio !== "string") return;
+      if (msg.type !== "audio" || typeof msg.audio !== "string") {
+        if (msg.type === "error" || (msg as { status_code?: number }).status_code) {
+          logger.error({ humeMessage: msg }, "Hume TTS returned error message");
+        }
+        return;
+      }
+      if (this.discarding) return;
 
       if (this.firstChunkAt === 0) {
         this.firstChunkAt = Date.now();
@@ -123,7 +142,8 @@ export class HumeTTSSession {
 
       const buf = Buffer.from(msg.audio, "base64");
       const pcm = new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2);
-      this.callbacks.onAudioChunk({ pcm, isLastChunk: Boolean(msg.isLastChunk) });
+      // Hume sends snake_case (`is_last_chunk`); older SDK docs used camelCase.
+      this.callbacks.onAudioChunk({ pcm, isLastChunk: Boolean(msg.is_last_chunk ?? msg.isLastChunk) });
     });
 
     ws.on("error", (err) => {
@@ -142,6 +162,7 @@ export class HumeTTSSession {
   /** Reset per-turn state. Should be called at start of every new turn. */
   beginTurn(): void {
     this.firstChunkAt = 0;
+    this.discarding = false;
   }
 
   /** Returns the wall-clock ms of the first audio chunk received this turn (0 if none yet). */
@@ -160,7 +181,7 @@ export class HumeTTSSession {
   sendText(text: string): void {
     this.send({
       text,
-      voice: { id: this.voiceId, provider: "CUSTOM_VOICE" },
+      voice: resolveHumeVoice(this.voiceId),
     });
   }
 
@@ -169,12 +190,20 @@ export class HumeTTSSession {
   }
 
   /**
-   * Cancel the current turn's generation by closing the socket. The next
-   * ensureConnected() / sendText() call will reopen. Use when the user
-   * has barged in and we want Hume to stop generating immediately.
+   * Abandon the current turn's audio after a barge-in.
+   *
+   * This used to close the socket, which did stop Hume generating — but it
+   * also meant every interruption cost a full WebSocket reconnect (500-1000ms)
+   * on the following turn, which is the exact overhead this class exists to
+   * avoid. Instead the socket stays up and the abandoned turn's chunks are
+   * dropped in the message handler.
+   *
+   * Trade-off: Hume finishes generating (and bills for) audio nobody hears.
+   * That is a few hundred characters against a second of latency on the reply
+   * the user is actually waiting for.
    */
   cancelTurn(): void {
-    this.closeSocket();
+    this.discarding = true;
   }
 
   /** Permanently close at session end. */
