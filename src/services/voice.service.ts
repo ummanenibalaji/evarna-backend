@@ -53,7 +53,7 @@ async function resolveVoiceConfig(roomName: string): Promise<ResolvedVoiceConfig
               characterId: session.character_id.toString(),
               userId: session.user_id,
             },
-            greeting: `Greet the user warmly as ${character.name} and ask how they're doing.`,
+            greeting: `Hey, it's ${character.name}. It's really good to hear you — how are you doing?`,
             voiceId: character.voice_id ?? DEFAULT_VOICE_ID,
           };
         }
@@ -69,7 +69,7 @@ async function resolveVoiceConfig(roomName: string): Promise<ResolvedVoiceConfig
 
   return {
     ids: null,
-    greeting: "Greet the user warmly and ask how they're doing.",
+    greeting: "Hey, it's good to hear you — how are you doing?",
     voiceId: DEFAULT_VOICE_ID,
   };
 }
@@ -117,6 +117,18 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   // the pipeline from persona_config). They only matter on the degraded path.
   const agent = new voice.Agent({ instructions: ids ? "" : FALLBACK_PROMPT });
 
+  // Publish agent state to the "ui" DataChannel topic so the app's orb tracks
+  // the real pipeline state (listening/thinking/speaking) instead of guessing
+  // from ActiveSpeakersChanged — the guess left the orb stuck on "thinking"
+  // during any silence.
+  session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
+    const state = ev.newState === "initializing" ? "idle" : ev.newState;
+    const payload = new TextEncoder().encode(JSON.stringify({ kind: "agent_state", state }));
+    void ctx.room.localParticipant
+      ?.publishData(payload, { reliable: true, topic: "ui" })
+      .catch((err) => logger.debug({ err }, "voice: agent state publish failed"));
+  });
+
   await session.start({ agent, room: ctx.room });
 
   // End the Mongo session as soon as the caller leaves. Without this a voice
@@ -136,10 +148,17 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
     void endSessionById(roomName, "completed").catch((err) =>
       logger.error({ err, roomName }, "voice: failed to end session on room disconnect"),
     );
+    // The Hume socket is shared by every turn and outlives each
+    // SynthesizeStream, so nothing else will close it.
+    if (humeTts instanceof HumeTTS) humeTts.closeSession();
   });
 
   // Open with a spoken greeting so the user hears the companion immediately.
-  session.generateReply({ instructions: greeting });
+  // say() goes straight to TTS. generateReply() would route through
+  // CompanionLLM, which skips turns that carry no user text (the greeting has
+  // none), so the call used to open with dead silence and a stuck
+  // "thinking" state.
+  session.say(greeting);
 
   logger.info(
     { roomName, voiceId, ttsProvider: env.HUME_API_KEY ? "hume" : "openai-fallback" },

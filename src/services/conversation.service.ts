@@ -68,31 +68,46 @@ async function getCharacterConfig(characterId: string): Promise<CachedCharacterC
   return config;
 }
 
-// Fetches the fields needed for prompt personalization. Returns null if the
-// user doesn't exist (shouldn't happen in prod, but fail open).
-async function getUserPersonalization(
-  userId: string,
-  personalitySliders: IPersonalitySliders,
-  isVoiceMode = false,
-): Promise<UserPersonalizationContext | null> {
+type PersonalizationUser = {
+  display_name: string;
+  gender: string;
+  communication_style: string;
+  is_minor: boolean;
+};
+
+// The only I/O behind personalization. Split out from buildPersonalization() so
+// it can run inside the phase-1 Promise.all instead of adding another serial
+// round-trip in front of the LLM call — it depends on nothing else.
+// Returns null if the user doesn't exist (shouldn't happen in prod, fail open).
+async function fetchPersonalizationUser(userId: string): Promise<PersonalizationUser | null> {
   try {
     const user = await User.findById(userId)
       .select("display_name gender communication_style is_minor")
       .lean();
-    if (!user) return null;
-
-    return {
-      name: user.display_name,
-      gender: user.gender as UserGender,
-      communicationStyle: user.communication_style as CommunicationStyle,
-      personalitySliders,
-      isMinor: user.is_minor,
-      isVoiceMode,
-    };
+    return (user as PersonalizationUser | null) ?? null;
   } catch (err) {
     logger.error({ err, userId }, "Failed to fetch user for personalization — proceeding without it");
     return null;
   }
+}
+
+// Pure assembly — the sliders and voice flag are pass-through, so this needs no
+// awaiting once the user document is in hand.
+function buildPersonalization(
+  user: PersonalizationUser | null,
+  personalitySliders: IPersonalitySliders,
+  isVoiceMode = false,
+): UserPersonalizationContext | null {
+  if (!user) return null;
+
+  return {
+    name: user.display_name,
+    gender: user.gender as UserGender,
+    communicationStyle: user.communication_style as CommunicationStyle,
+    personalitySliders,
+    isMinor: user.is_minor,
+    isVoiceMode,
+  };
 }
 
 async function persistTurns(
@@ -157,8 +172,9 @@ export async function* streamConversation(
     total_token_count: 0,
   };
 
-  // Phase 1: all I/O in parallel — character config, session context, safety, memory, summary
-  const [charConfig, rawSessionCtx, modResult, memoryBlock, latestSummary] =
+  // Phase 1: all I/O in parallel — character config, session context, safety,
+  // memory, summary, and the personalization user lookup
+  const [charConfig, rawSessionCtx, modResult, memoryBlock, latestSummary, personalizationUser] =
     await Promise.all([
       getCharacterConfig(characterId),
       getSessionContext(sessionId).then((ctx) => ctx ?? EMPTY_CTX),
@@ -171,6 +187,7 @@ export async function* streamConversation(
         logger.error({ err, characterId }, "Usage summary fetch failed — proceeding without it");
         return null;
       }),
+      fetchPersonalizationUser(userId),
     ]);
 
   // 2. Crisis path — inject safety response, skip LLM
@@ -207,9 +224,10 @@ export async function* streamConversation(
   // 4. Assemble prompt: system persona + personalization + memory + usage summary + context + message
   const usageSummaryText = latestSummary ? formatUsageSummary(latestSummary) : null;
 
-  // Fetch user personalization (name, pronouns, communication style, sliders)
-  const personalization = await getUserPersonalization(
-    userId,
+  // User personalization (name, pronouns, communication style, sliders). The
+  // document was already fetched in phase 1; this is pure assembly.
+  const personalization = buildPersonalization(
+    personalizationUser,
     charConfig.personality_sliders,
     isVoiceMode,
   );
