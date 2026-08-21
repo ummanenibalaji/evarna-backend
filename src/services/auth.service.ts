@@ -94,11 +94,18 @@ export async function verifyProviderToken(
   provider: "google" | "apple",
   idToken: string,
 ): Promise<ProviderIdentity> {
+  // Resolved BEFORE the try, deliberately. audienceFor() throws when the server
+  // has no client ids configured, and inside the try that would be swallowed
+  // and re-reported as the generic "Sign-in failed" below — telling whoever is
+  // setting this up nothing at all. A configuration fault and a bad token are
+  // different problems and deserve different messages.
+  const audience = audienceFor(provider);
+
   let payload;
   try {
     ({ payload } = await jwtVerify(idToken, JWKS[provider], {
       issuer: ISSUERS[provider],
-      audience: audienceFor(provider),
+      audience,
     }));
   } catch (err) {
     // Never echo the provider's error back to the client — it distinguishes
