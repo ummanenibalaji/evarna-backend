@@ -28,7 +28,8 @@ import assert from "node:assert/strict";
 // Dynamic, not static: ESM evaluates every static import before the module body
 // runs, so a top-level `import` of anything that reaches config/env.js would
 // blow up on the vars this file just defaulted above.
-const { SCENARIOS, buildCustomStudioPersona, STUDIO_SAFETY } = await import("../data/scenarios.js");
+const { SCENARIOS, buildCustomStudioPersona, STUDIO_SAFETY, CUSTOM_MEMORY_GUIDANCE } = await import("../data/scenarios.js");
+const { buildExtractionPrompt } = await import("../services/memory-extraction.service.js");
 const { ARCHETYPES, getArchetypeConfig } = await import("../data/archetypes.js");
 const { buildPersonaBlock, buildIdentityBlock } = await import("../services/prompt.service.js");
 type ScenarioParamDef = import("../data/scenarios.js").ScenarioParamDef;
@@ -302,6 +303,90 @@ run("D2. empty params never emit the literal string \"undefined\"", checkEmptyPa
 run("E. buildIdentityBlock is mode-aware", checkIdentityBlockIsModeAware);
 run("F. the four companion archetypes still render safety last", checkCompanionsStillSafetyLast);
 
+// ── G. extraction prompts are per-mode ──────────────────────────────────────
+//
+// The single companion prompt ("extract facts about the USER") applied to a
+// rehearsal records the assistant's performance as biography. A character
+// playing the user's dismissive manager is not evidence about their manager,
+// and a horror story is not something that happened to them. This pins the
+// rule that stops that, because it is the failure that produces confidently
+// false memories rather than merely unhelpful ones.
+function checkExtractionPromptsArePerMode(): void {
+  const companion = buildExtractionPrompt({ mode: "companion" });
+  assert.ok(
+    companion.includes("facts about the USER"),
+    "companion extraction must still ask for facts about the user",
+  );
+  assert.ok(
+    !companion.includes("PRACTICE SESSION"),
+    "companion extraction must not carry studio framing",
+  );
+
+  for (const id of Object.keys(SCENARIOS)) {
+    const prompt = buildExtractionPrompt({
+      mode: "studio",
+      studio: { kind: "scenario", scenario_id: id },
+    });
+
+    assert.ok(
+      prompt.includes("Nothing the assistant said is a fact about the user"),
+      `${id}: studio extraction must forbid recording the assistant's role as fact`,
+    );
+    assert.ok(
+      prompt.includes("PRACTICE SESSION"),
+      `${id}: studio extraction must frame the session as practice`,
+    );
+    assert.ok(
+      !prompt.includes("facts about the USER that are worth remembering"),
+      `${id}: studio extraction must not reuse the companion framing`,
+    );
+    assert.ok(
+      prompt.includes(SCENARIOS[id]!.memory_guidance),
+      `${id}: the scenario's own memory guidance must reach the extractor`,
+    );
+    // Every scenario must give genuinely different instructions — otherwise
+    // this is one prompt with extra steps.
+    for (const other of Object.keys(SCENARIOS)) {
+      if (other === id) continue;
+      assert.notEqual(
+        SCENARIOS[id]!.memory_guidance,
+        SCENARIOS[other]!.memory_guidance,
+        `${id} and ${other} share memory guidance — one of them is wrong`,
+      );
+    }
+  }
+
+  // The two scenarios where recording fiction as biography is most damaging.
+  assert.ok(
+    SCENARIOS["story"]!.memory_guidance.includes("Never record fictional events"),
+    "story must explicitly forbid recording fiction as the user's life",
+  );
+  assert.ok(
+    SCENARIOS["difficult"]!.memory_guidance.includes("never record the character"),
+    "difficult conversation must forbid recording the roleplayed person as fact",
+  );
+
+  const custom = buildExtractionPrompt({ mode: "studio", studio: { kind: "custom" } });
+  assert.ok(
+    custom.includes(CUSTOM_MEMORY_GUIDANCE),
+    "a custom character falls back to the custom memory guidance",
+  );
+  // An unknown scenario id must degrade to the custom guidance, not to the
+  // companion prompt — a studio session must never be extracted as biography.
+  const unknown = buildExtractionPrompt({
+    mode: "studio",
+    studio: { kind: "scenario", scenario_id: "no-such-scenario" },
+  });
+  assert.ok(
+    unknown.includes("Nothing the assistant said is a fact about the user"),
+    "an unknown scenario must still get studio framing, never the companion prompt",
+  );
+
+  console.log("✓ G. extraction prompts are per-mode and forbid roleplay becoming biography");
+}
+
+
+checkExtractionPromptsArePerMode();
 console.log(
   failures === 0
     ? "\nstudio check passed\n"

@@ -29,6 +29,16 @@ export interface ScenarioDefinition {
   params: ScenarioParamDef[];
   buildPersona: (params: Record<string, string>) => IPersonaConfig;
   default_sliders: IPersonalitySliders;
+  /**
+   * What is worth remembering from a session of this scenario.
+   *
+   * The default extractor asks for "facts about the user", which is right for a
+   * companion and wrong here — after an interview rehearsal the useful memory
+   * is "rambles on behavioural questions", not "user is applying for a
+   * Software Engineer role". memory-extraction.service.ts appends this to the
+   * studio extraction prompt.
+   */
+  memory_guidance: string;
 }
 
 // ── Universal studio safety ───────────────────────────────────────────────────
@@ -90,6 +100,8 @@ export const SCENARIOS: Record<string, ScenarioDefinition> = {
     name: "Interview Coach",
     description: "Practice landing the role",
     default_sliders: { warmth: 40, humor: 25, directness: 80, energy: 55, formality: 75 },
+    memory_guidance:
+      "WHAT TO REMEMBER: the role and company type they are targeting; which kinds of question they handle well and which they struggle with; concrete habits worth working on (rambling, not quantifying impact, strong on system design); and what improved since last time. Do not store their rehearsed answers verbatim — the pattern is the useful part, not the transcript.",
     params: [
       { key: "role", label: "Role", type: "text", placeholder: "Software Engineer", required: true },
       { key: "company_type", label: "Company type", type: "choice", options: ["Startup", "Corporate", "Agency"], required: true },
@@ -117,6 +129,8 @@ WHEN THE USER ASKS FOR FEEDBACK: Step out of the interview, give it directly and
     name: "Difficult Conversation",
     description: "Rehearse the hard ones",
     default_sliders: { warmth: 30, humor: 15, directness: 70, energy: 60, formality: 40 },
+    memory_guidance:
+      "WHAT TO REMEMBER: who they are rehearsing this conversation for and what the underlying issue is; how they tend to open; where they back down, escalate, or lose the thread; and what actually worked. The assistant was playing the other person — nothing it said is evidence about that real person or about the user\u2019s life, so never record the character\u2019s words as fact.",
     params: [
       { key: "who", label: "Who are you talking to?", type: "text", placeholder: "My manager", required: true },
       { key: "personality", label: "Their personality", type: "choice", options: ["Aggressive", "Passive", "Dismissive", "Emotional"], required: true },
@@ -157,6 +171,8 @@ THE POINT: The user is practising so the real conversation goes better. Being ea
     name: "Debate Partner",
     description: "Sharpen your argument",
     default_sliders: { warmth: 45, humor: 40, directness: 85, energy: 70, formality: 55 },
+    memory_guidance:
+      "WHAT TO REMEMBER: which positions they choose, how they build an argument, where their reasoning is strong or weak, and which counterarguments reliably catch them out. Do not record the positions they argued as their personal beliefs — they were assigned a side.",
     params: [
       { key: "topic", label: "Topic", type: "text", placeholder: "Remote work", required: true },
     ],
@@ -182,6 +198,8 @@ TONE: Sharp, engaged, a bit enjoying itself. This is a good argument between peo
     name: "Story Collaborator",
     description: "Build a world together",
     default_sliders: { warmth: 70, humor: 60, directness: 45, energy: 75, formality: 25 },
+    memory_guidance:
+      "WHAT TO REMEMBER: the world, the characters, the plot so far, and any detail established as canon. For this scenario the fiction IS the memory worth keeping, and losing it breaks the story. Never record fictional events as things that happened to the user.",
     params: [
       { key: "user_role", label: "Your role", type: "text", placeholder: "A reluctant hero", required: true },
       { key: "genre", label: "Genre", type: "choice", options: ["Fantasy", "Sci-fi", "Thriller", "Romance", "Horror"], required: true },
@@ -208,6 +226,8 @@ COLLABORATION: Take what they introduce and build on it, even when it was not wh
     name: "Language Partner",
     description: "Speak it, don't study it",
     default_sliders: { warmth: 75, humor: 50, directness: 55, energy: 65, formality: 35 },
+    memory_guidance:
+      "WHAT TO REMEMBER: their target language and level; vocabulary and grammar they reach for and get wrong; mistakes they repeat across sessions; and subjects they enjoy talking about. Progress notes are worth far more here than biography.",
     params: [
       { key: "language", label: "Language", type: "choice", options: ["Spanish", "French", "German", "Japanese"], required: true },
       { key: "level", label: "Level", type: "choice", options: ["Beginner", "Intermediate", "Advanced"], required: true },
@@ -239,6 +259,10 @@ WHAT YOU TALK ABOUT: Real conversation, not exercises. Ask them about their day,
     },
   },
 };
+
+/** What is worth remembering from a session with a user-written character. */
+export const CUSTOM_MEMORY_GUIDANCE =
+  "WHAT TO REMEMBER: details established about this character and the shared history between them and the user, plus how the user likes this character to behave. The user invented this character, so anything the character 'knows' or has 'done' is fiction — record it as story detail, never as fact about the user's real life.";
 
 export function getScenario(id: string): ScenarioDefinition | undefined {
   return SCENARIOS[id];
