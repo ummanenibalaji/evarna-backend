@@ -30,15 +30,35 @@ const voiceConfigSchema = new Schema(
   { _id: false }
 );
 
+// Mixed for `params` because each scenario defines its own keys (role,
+// personality, topic, genre…). Validating them per-scenario happens in
+// character.service.ts against the scenario definition, which is the only place
+// that knows what a given scenario expects.
+const studioConfigSchema = new Schema(
+  {
+    kind: { type: String, enum: ["scenario", "custom"], required: true },
+    scenario_id: { type: String },
+    params: { type: Schema.Types.Mixed, default: {} },
+    backstory: { type: String, maxlength: 500 },
+  },
+  { _id: false }
+);
+
 const characterSchema = new Schema<ICharacter>(
   {
     user_id: { type: String, required: true, index: true },
-    mode: { type: String, enum: ["companion"], default: "companion" },
+    mode: { type: String, enum: ["companion", "studio"], default: "companion" },
+    // Required for companions, meaningless for studio characters. Expressed as
+    // a function so a studio character cannot be created without one by
+    // accident, and a companion cannot be created without one at all.
     archetype: {
       type: String,
       enum: ["mentor", "bestfriend", "challenger", "partner"],
-      required: true,
+      required: function (this: { mode?: string }): boolean {
+        return this.mode !== "studio";
+      },
     },
+    studio_config: { type: studioConfigSchema, default: undefined },
     name: { type: String, required: true, trim: true },
     gender: {
       type: String,

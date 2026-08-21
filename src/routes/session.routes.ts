@@ -41,7 +41,8 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     // You cannot start a session against someone else's companion. Without
     // this the character_id was an unchecked parameter that would have written
     // turns and memories into another user's relationship.
-    if (!(await findOwnedCharacter(user_id, character_id))) {
+    const owned = await findOwnedCharacter(user_id, character_id);
+    if (!owned) {
       return reply.status(404).send({ success: false, error: "Character not found" });
     }
 
@@ -49,7 +50,10 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       user_id,
       character_id: new Types.ObjectId(character_id),
       session_type,
-      mode: "companion",
+      // Copied from the character rather than accepted from the client: a
+      // client-supplied mode would let a companion session be labelled studio
+      // and vice versa, which would misfile its memories.
+      mode: owned.mode,
       status: "active",
       started_at: new Date(),
     });

@@ -17,7 +17,7 @@ const sessionSchema = new Schema<ISession>(
   {
     user_id: { type: String, required: true, index: true },
     character_id: { type: Schema.Types.ObjectId, ref: "Character", required: true, index: true },
-    mode: { type: String, enum: ["companion"], default: "companion" },
+    mode: { type: String, enum: ["companion", "studio"], default: "companion" },
     session_type: {
       type: String,
       enum: ["text", "voice_call", "voice_note"],

@@ -7,6 +7,7 @@ import { Memory } from "../models/memory.model.js";
 import { MemorySummary } from "../models/memory-summary.model.js";
 import { clearSessionContext, invalidateCharacterConfig } from "./session-context.service.js";
 import { logger } from "../utils/logger.js";
+import type { CharacterMode } from "../types/character.types.js";
 
 /**
  * Permanently delete an account and everything attached to it.
@@ -111,9 +112,9 @@ export async function exportAccount(userId: string): Promise<Record<string, unkn
 export async function findOwnedCharacter(
   userId: string,
   characterId: string,
-): Promise<{ _id: Types.ObjectId } | null> {
+): Promise<{ _id: Types.ObjectId; mode: CharacterMode } | null> {
   if (!Types.ObjectId.isValid(characterId)) return null;
-  return Character.findOne({ _id: characterId, user_id: userId }).select("_id").lean();
+  return Character.findOne({ _id: characterId, user_id: userId }).select("_id mode").lean();
 }
 
 /** Assert a session belongs to this user. Returns null when it does not. */

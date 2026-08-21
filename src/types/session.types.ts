@@ -12,7 +12,8 @@ export interface ISessionSummary {
 export interface ISession {
   user_id: string;
   character_id: Types.ObjectId;
-  mode: "companion";
+  // Copied from the character at session start, never supplied by the client.
+  mode: "companion" | "studio";
   session_type: SessionType;
   started_at: Date;
   ended_at: Date | null;

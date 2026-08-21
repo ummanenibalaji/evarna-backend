@@ -13,6 +13,7 @@
     "check:prompt": "tsx src/checks/prompt.check.ts",
     "check:auth": "tsx src/checks/auth.check.ts",
     "check:routes": "tsx src/checks/routes.check.ts",
+    "check:studio": "tsx src/checks/studio.check.ts",
     "smoke": "tsx src/checks/smoke.ts",
     "setup:db": "tsx src/scripts/setup-db.ts"
   },

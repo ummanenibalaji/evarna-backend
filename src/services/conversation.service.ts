@@ -18,6 +18,7 @@ import { getLatestUsageSummary, formatUsageSummary } from "./memory-summary.serv
 import { approximateTokens } from "../utils/token-counter.js";
 import { logger } from "../utils/logger.js";
 import { isMinorNow } from "../utils/age.js";
+import { getScenario } from "../data/scenarios.js";
 import type { IPersonaConfig, IPersonalitySliders } from "../types/character.types.js";
 import type { IRedisSessionContext } from "../types/prompt.types.js";
 import type { ModerationResult } from "./safety.service.js";
@@ -55,6 +56,7 @@ interface CachedCharacterConfig {
   name: string;
   mode: string;
   created_at: string;
+  studio?: { kind: "scenario" | "custom"; scenarioName?: string };
 }
 
 async function getCharacterConfig(characterId: string): Promise<CachedCharacterConfig> {
@@ -62,7 +64,7 @@ async function getCharacterConfig(characterId: string): Promise<CachedCharacterC
   if (cached) return cached as CachedCharacterConfig;
 
   const character = await Character.findById(characterId)
-    .select("persona_config personality_sliders name mode created_at")
+    .select("persona_config personality_sliders name mode created_at studio_config")
     .lean();
   if (!character) throw new Error(`Character not found: ${characterId}`);
 
@@ -74,6 +76,16 @@ async function getCharacterConfig(characterId: string): Promise<CachedCharacterC
     // Serialized because this round-trips through JSON in Redis; a Date would
     // come back as a string anyway and the type would be lying.
     created_at: new Date(character.created_at).toISOString(),
+    ...(character.studio_config
+      ? {
+          studio: {
+            kind: character.studio_config.kind,
+            ...(character.studio_config.scenario_id
+              ? { scenarioName: getScenario(character.studio_config.scenario_id)?.name }
+              : {}),
+          },
+        }
+      : {}),
   };
   await cacheCharacterConfig(characterId, config);
   return config;
@@ -257,6 +269,7 @@ export async function* streamConversation(
       name: charConfig.name,
       mode: charConfig.mode,
       knownSince: new Date(charConfig.created_at),
+      ...(charConfig.studio ? { studio: charConfig.studio } : {}),
     },
     sessionCtx,
     message,

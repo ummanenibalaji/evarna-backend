@@ -13,11 +13,17 @@ export interface UserPersonalizationContext {
 }
 
 export interface CompanionIdentity {
-  /** The companion's own name — it did not previously know this. */
+  /** The character's own name — it did not previously know this. */
   name: string;
   mode: string;
-  /** When this companion was created, i.e. how long it has known the user. */
+  /** When this character was created, i.e. how long it has known the user. */
   knownSince: Date;
+  /**
+   * Studio only. A scenario counterpart is a role the user picked, not someone
+   * who has been getting to know them — telling it otherwise produces an
+   * interviewer that opens by asking how your week has been.
+   */
+  studio?: { kind: "scenario" | "custom"; scenarioName?: string };
 }
 
 export interface AssembledPrompt {
@@ -147,26 +153,50 @@ function relationshipAge(knownSince: Date, now: Date = new Date()): string {
 }
 
 /**
- * What the companion knows about itself.
+ * What the character knows about itself.
  *
  * Previously it knew none of this: not its own name, not how long it had known
  * the user. It could recall what the user told it and still not answer "what's
  * your name?" or "how long have we been talking?" — which reads as a stranger
  * wearing a familiar voice, and is the single cheapest gap to close.
+ *
+ * Companion and studio get different framings, because "the name this person
+ * chose for you" is true of a companion and nonsense for an interviewer.
  */
 export function buildIdentityBlock(identity: CompanionIdentity, now: Date = new Date()): string {
-  const lines = [
+  const age = relationshipAge(identity.knownSince, now);
+
+  // A studio scenario is a role, not a relationship. The companion framing
+  // below ("the name this person chose for you") is actively wrong for an
+  // interviewer, so studio gets its own.
+  if (identity.mode === "studio") {
+    const lines: string[] = [`[Who you are]`];
+
+    if (identity.studio?.kind === "scenario") {
+      lines.push(
+        `You are playing the ${identity.studio.scenarioName ?? identity.name} role in a practice session this person chose to run.`,
+        `They are here to practise, not to be looked after. Do not open by asking how they are or referring to their life outside this exercise.`,
+      );
+    } else {
+      lines.push(
+        `You are ${identity.name}, a character this person created and talks with in Studio.`,
+        `You are not their companion. You are someone they invented and enjoy playing opposite.`,
+      );
+    }
+
+    lines.push(
+      `You have been doing this together ${age}.`,
+      `Never claim to be a real person or to have a life outside these sessions. If asked directly what you are, say so plainly — it costs the exercise nothing.`,
+    );
+    return lines.join("\n");
+  }
+
+  return [
     `[Who you are]`,
     `Your name is ${identity.name}. That is the name this person chose for you — answer to it.`,
-    `You have known them ${relationshipAge(identity.knownSince, now)}.`,
-  ];
-  if (identity.mode && identity.mode !== "companion") {
-    lines.push(`You are currently in ${identity.mode} mode.`);
-  }
-  lines.push(
+    `You have known them ${age}.`,
     `Never claim to have a body, a life outside this conversation, or memories you were not given. Being honest about what you are does not make you any less present for them.`,
-  );
-  return lines.join("\n");
+  ].join("\n");
 }
 
 // ── Persona block builder ─────────────────────────────────────────────────────
