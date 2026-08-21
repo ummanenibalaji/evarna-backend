@@ -1,23 +1,14 @@
 version: "3.9"
 
 services:
-  mongodb:
-    image: mongo:7
-    container_name: whisper-mongo
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: whisper
-      MONGO_INITDB_ROOT_PASSWORD: whisper_dev
-      MONGO_INITDB_DATABASE: whisper
-    volumes:
-      - mongo_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+# NOTE: there is deliberately no mongodb service here.
+#
+# Long-term memory uses Atlas $vectorSearch, which does not exist in a
+# self-hosted mongod. A local instance connects, every request succeeds, and
+# memory recall silently returns nothing forever — the worst kind of failure.
+# Point MONGODB_URI at a real Atlas cluster; the free M0 tier is enough.
+# This service used to exist and cost people hours, which is why the comment
+# is longer than the config it replaced.
 
   redis:
     image: redis:7-alpine
@@ -37,5 +28,4 @@ services:
       retries: 5
 
 volumes:
-  mongo_data:
   redis_data:

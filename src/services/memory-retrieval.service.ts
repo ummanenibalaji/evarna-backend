@@ -87,6 +87,7 @@ function formatMemoryBlock(memories: ScoredMemory[]): string {
 
 export async function retrieveMemories(
   characterId: string,
+  userId: string,
   userMessage: string
 ): Promise<string> {
   const characterObjId = new Types.ObjectId(characterId);
@@ -109,7 +110,7 @@ export async function retrieveMemories(
 
   if (queryVector.length === 0) return "";
 
-  // 2. Atlas Vector Search — top-10 candidates filtered by character + not deleted
+  // 2. Atlas Vector Search — top-10 candidates filtered by user + character + not deleted
   let rawResults: RawVectorResult[];
   try {
     rawResults = await Memory.aggregate<RawVectorResult>([
@@ -121,6 +122,7 @@ export async function retrieveMemories(
           numCandidates: VECTOR_SEARCH_CANDIDATES,
           limit: VECTOR_SEARCH_LIMIT,
           filter: {
+            user_id: { $eq: userId },
             character_id: { $eq: characterObjId },
             is_deleted: { $eq: false },
           },

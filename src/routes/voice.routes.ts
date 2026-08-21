@@ -6,10 +6,11 @@ import { Character } from "../models/character.model.js";
 import { initSessionContext } from "../services/session-context.service.js";
 import { generateRoomToken, LiveKitNotConfiguredError } from "../services/livekit-token.service.js";
 import { WHISPER_VOICES } from "../data/voices.js";
+import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
 
+// No user_id: the owner is whoever holds the token.
 const StartVoiceSessionSchema = z.object({
-  user_id: z.string().min(1),
   character_id: z.string().min(1),
 });
 
@@ -29,13 +30,18 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const { user_id, character_id } = parsed.data;
+    const { character_id } = parsed.data;
+    const user_id = getUserId(request);
 
     if (!Types.ObjectId.isValid(character_id)) {
-      return reply.status(400).send({ success: false, error: "Invalid character_id" });
+      return reply.status(404).send({ success: false, error: "Character not found" });
     }
 
-    const character = await Character.findById(character_id).select("_id user_id").lean();
+    // Scoped by user_id in the query: someone else's companion is
+    // indistinguishable from one that does not exist.
+    const character = await Character.findOne({ _id: character_id, user_id })
+      .select("_id")
+      .lean();
     if (!character) {
       return reply.status(404).send({ success: false, error: "Character not found" });
     }

@@ -1,5 +1,5 @@
 {
-  "name": "whisper-backend",
+  "name": "evarna-backend",
   "version": "1.0.0",
   "description": "Whisper AI companion backend — Phase 1",
   "type": "module",
@@ -11,6 +11,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "check:prompt": "tsx src/checks/prompt.check.ts",
+    "check:auth": "tsx src/checks/auth.check.ts",
+    "check:routes": "tsx src/checks/routes.check.ts",
     "smoke": "tsx src/checks/smoke.ts",
     "setup:db": "tsx src/scripts/setup-db.ts"
   },
@@ -29,6 +31,7 @@
     "fastify": "^5",
     "hume": "^0.15.17",
     "ioredis": "^5",
+    "jose": "^6.2.9",
     "livekit-server-sdk": "^2.15.3",
     "mongoose": "^8",
     "openai": "^4",

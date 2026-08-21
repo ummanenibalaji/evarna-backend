@@ -3,6 +3,7 @@ import { Character } from "../models/character.model.js";
 import { User } from "../models/user.model.js";
 import { getArchetypeConfig } from "../data/archetypes.js";
 import { getVoice } from "../data/voices.js";
+import { isMinorNow } from "../utils/age.js";
 import type {
   Archetype,
   CharacterGender,
@@ -83,7 +84,7 @@ export async function createCompanion(
   if (!Types.ObjectId.isValid(input.user_id)) {
     throw new CompanionValidationError("user_id", "user_id is not a valid id");
   }
-  const user = await User.findById(input.user_id).select("is_minor").lean();
+  const user = await User.findById(input.user_id).select("date_of_birth").lean();
   if (!user) {
     throw new CompanionValidationError(
       "user_id",
@@ -91,8 +92,11 @@ export async function createCompanion(
     );
   }
 
-  // FIX 19: partner archetype is age-restricted (relationship dynamics)
-  if (user.is_minor && input.archetype === "partner") {
+  // Partner archetype is age-restricted (relationship dynamics).
+  // Derived from date of birth, not the stored is_minor snapshot — that flag is
+  // written once at onboarding, so someone who has since turned 18 would still
+  // be blocked and someone who was 17 at signup would stay blocked forever.
+  if (isMinorNow(user.date_of_birth) && input.archetype === "partner") {
     throw new CompanionValidationError(
       "archetype",
       "Partner companion is not available for users under 18",

@@ -11,8 +11,12 @@ function sessionKey(sessionId: string): string {
   return `session:${sessionId}`;
 }
 
+// The version suffix is what makes it safe to add fields to the cached shape.
+// Without it, a deploy that adds a field reads back cached objects missing it
+// and quietly serves undefined for a TTL — bump this whenever the shape of
+// CachedCharacterConfig changes.
 function characterKey(characterId: string): string {
-  return `character_config:${characterId}`;
+  return `character_config:v2:${characterId}`;
 }
 
 export async function getSessionContext(

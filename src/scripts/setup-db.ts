@@ -24,11 +24,13 @@ const INDEX_NAME = "memory_vector_index";
 const COLLECTION = "memories";
 
 // 1536 dims = OpenAI text-embedding-3-small (see MODELS.EMBEDDING).
-// The two filter fields are the ones retrieveMemories() filters on; a filter
-// field must be declared in the index or the query fails.
+// The filter fields are the ones retrieveMemories() filters on; a filter field
+// must be declared in the index or the query fails. user_id is what scopes a
+// memory to the person who created it — without it, recall leaks across users.
 const INDEX_DEFINITION = {
   fields: [
     { type: "vector", path: "embedding", numDimensions: 1536, similarity: "cosine" },
+    { type: "filter", path: "user_id" },
     { type: "filter", path: "character_id" },
     { type: "filter", path: "is_deleted" },
   ],
@@ -43,6 +45,7 @@ interface SearchIndexInfo {
   name?: string;
   status?: string;
   queryable?: boolean;
+  latestDefinition?: { fields?: { type?: string; path?: string }[] };
 }
 
 async function main(): Promise<void> {
@@ -81,15 +84,58 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  if (indexes.some((i) => i.name === INDEX_NAME)) {
-    console.log(`· search index "${INDEX_NAME}" already exists`);
-  } else {
+  const existingIndex = indexes.find((i) => i.name === INDEX_NAME);
+
+  // ponytail: compares declared filter *paths* only, not the whole definition —
+  // a changed numDimensions/similarity still needs a manual drop. Widen this if
+  // the vector field ever changes shape.
+  const declaredFilters = new Set(
+    (existingIndex?.latestDefinition?.fields ?? [])
+      .filter((f) => f.type === "filter")
+      .map((f) => f.path),
+  );
+  const missingFilters = INDEX_DEFINITION.fields
+    .filter((f) => f.type === "filter" && !declaredFilters.has(f.path))
+    .map((f) => f.path);
+
+  if (!existingIndex) {
     await collection.createSearchIndex({
       name: INDEX_NAME,
       type: "vectorSearch",
       definition: INDEX_DEFINITION,
     });
     console.log(`✓ created search index "${INDEX_NAME}"`);
+  } else if (missingFilters.length === 0) {
+    console.log(`· search index "${INDEX_NAME}" already exists with the expected filter fields`);
+  } else {
+    // Atlas will not change an existing definition via create — the only way to
+    // add a filter field is drop + recreate, and that means a full rebuild.
+    console.log(
+      `\n⚠️  search index "${INDEX_NAME}" is missing filter field(s): ${missingFilters.join(", ")}\n` +
+      "   Atlas cannot alter an index definition in place, so this script will DROP\n" +
+      "   and RECREATE it. MEMORY RECALL IS DEAD until the rebuild reaches READY:\n" +
+      "   $vectorSearch throws while the index is gone, retrieveMemories() swallows\n" +
+      "   it, and every conversation runs with no long-term memory until then.\n",
+    );
+
+    await collection.dropSearchIndex(INDEX_NAME);
+    console.log(`✓ dropped search index "${INDEX_NAME}" — waiting for the drop to land…`);
+
+    // The drop is asynchronous on Atlas; creating too early fails as "already exists".
+    const dropDeadline = Date.now() + READY_TIMEOUT_MS;
+    while (Date.now() < dropDeadline) {
+      const current = (await collection.listSearchIndexes().toArray()) as SearchIndexInfo[];
+      if (!current.some((i) => i.name === INDEX_NAME)) break;
+      process.stdout.write("  waiting for drop…\r");
+      await sleep(POLL_MS);
+    }
+
+    await collection.createSearchIndex({
+      name: INDEX_NAME,
+      type: "vectorSearch",
+      definition: INDEX_DEFINITION,
+    });
+    console.log(`✓ recreated search index "${INDEX_NAME}" with filters: ${missingFilters.join(", ")} added`);
   }
 
   // ── 3. wait for READY ─────────────────────────────────────────────────────

@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { ARCHETYPES, getArchetypeConfig } from "../data/archetypes.js";
-import { assemblePrompt, buildPersonaBlock } from "../services/prompt.service.js";
+import { assemblePrompt, buildPersonaBlock, buildIdentityBlock } from "../services/prompt.service.js";
 import type { Archetype } from "../types/character.types.js";
 import type { IRedisSessionContext } from "../types/prompt.types.js";
 
@@ -54,9 +54,17 @@ function checkPersonaBlockCarriesEveryRule(): void {
   console.log(`✓ all ${Object.keys(ARCHETYPES).length} archetypes carry every rule into the persona block`);
 }
 
+// Fixed so relationshipAge() renders deterministically rather than drifting
+// with the wall clock.
+const IDENTITY = {
+  name: "Sage",
+  mode: "companion",
+  knownSince: new Date("2026-08-01T00:00:00Z"),
+};
+
 function checkAssemblePromptShipsThePersona(): void {
   const persona = getArchetypeConfig("mentor").persona_config;
-  const { messages } = assemblePrompt(persona, EMPTY_CTX, "hey");
+  const { messages } = assemblePrompt(persona, IDENTITY, EMPTY_CTX, "hey");
 
   assert.equal(messages[0]?.role, "system", "first message must be the system persona");
   assert.ok(
@@ -81,8 +89,8 @@ function checkMinorRestrictions(): void {
     personalitySliders: { warmth: 50, humor: 50, directness: 50, energy: 50, formality: 50 },
   };
 
-  const adult = assemblePrompt(persona, EMPTY_CTX, "hi", null, null, { ...base, isMinor: false });
-  const minor = assemblePrompt(persona, EMPTY_CTX, "hi", null, null, { ...base, isMinor: true });
+  const adult = assemblePrompt(persona, IDENTITY, EMPTY_CTX, "hi", null, null, { ...base, isMinor: false });
+  const minor = assemblePrompt(persona, IDENTITY, EMPTY_CTX, "hi", null, null, { ...base, isMinor: true });
 
   const adultText = adult.messages.map((m) => m.content).join("\n");
   const minorText = minor.messages.map((m) => m.content).join("\n");
@@ -107,8 +115,8 @@ function checkVoiceModeLengthGuidance(): void {
     personalitySliders: { warmth: 50, humor: 50, directness: 50, energy: 50, formality: 50 },
   };
 
-  const voice = assemblePrompt(persona, EMPTY_CTX, "hi", null, null, { ...base, isVoiceMode: true });
-  const text = assemblePrompt(persona, EMPTY_CTX, "hi", null, null, { ...base, isVoiceMode: false });
+  const voice = assemblePrompt(persona, IDENTITY, EMPTY_CTX, "hi", null, null, { ...base, isVoiceMode: true });
+  const text = assemblePrompt(persona, IDENTITY, EMPTY_CTX, "hi", null, null, { ...base, isVoiceMode: false });
 
   assert.ok(
     voice.messages.some((m) => m.content.includes("live VOICE call")),
@@ -121,7 +129,34 @@ function checkVoiceModeLengthGuidance(): void {
   console.log("✓ isVoiceMode switches response-length guidance");
 }
 
+function checkCompanionKnowsItself(): void {
+  const persona = getArchetypeConfig("mentor").persona_config;
+  const { messages } = assemblePrompt(persona, IDENTITY, EMPTY_CTX, "what is your name?");
+  const all = messages.map((m) => m.content).join("\n");
+
+  assert.ok(all.includes("Your name is Sage"), "the companion must be told its own name");
+  assert.ok(all.includes("[Who you are]"), "the identity block must reach the model");
+  assert.ok(
+    /You have known them/.test(all),
+    "the companion must be told how long it has known this person",
+  );
+
+  // Relationship age is rendered in human buckets, not exact days — "43 days
+  // ago" is not how anyone describes knowing someone.
+  const now = new Date("2026-08-21T00:00:00Z");
+  const at = (iso: string): string => buildIdentityBlock({ ...IDENTITY, knownSince: new Date(iso) }, now);
+  assert.ok(at("2026-08-21T00:00:00Z").includes("first day"), "same-day should read as a first meeting");
+  assert.ok(at("2026-08-20T00:00:00Z").includes("since yesterday"), "one day should read as yesterday");
+  assert.ok(at("2026-08-18T00:00:00Z").includes("3 days"), "a few days should be exact");
+  assert.ok(at("2026-07-21T00:00:00Z").includes("weeks"), "a month back should read in weeks");
+  assert.ok(at("2026-02-21T00:00:00Z").includes("months"), "half a year back should read in months");
+  assert.ok(at("2024-02-21T00:00:00Z").includes("years"), "two years back should read in years");
+
+  console.log("✓ the companion is told its own name and how long it has known the user");
+}
+
 checkPersonaBlockCarriesEveryRule();
+checkCompanionKnowsItself();
 checkAssemblePromptShipsThePersona();
 checkMinorRestrictions();
 checkVoiceModeLengthGuidance();

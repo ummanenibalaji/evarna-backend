@@ -17,6 +17,7 @@ import { retrieveMemories } from "./memory-retrieval.service.js";
 import { getLatestUsageSummary, formatUsageSummary } from "./memory-summary.service.js";
 import { approximateTokens } from "../utils/token-counter.js";
 import { logger } from "../utils/logger.js";
+import { isMinorNow } from "../utils/age.js";
 import type { IPersonaConfig, IPersonalitySliders } from "../types/character.types.js";
 import type { IRedisSessionContext } from "../types/prompt.types.js";
 import type { ModerationResult } from "./safety.service.js";
@@ -44,11 +45,16 @@ export type ConversationEvent =
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-// Cache includes persona_config + personality_sliders so we never need to hit
-// MongoDB per-turn for character info.
+// Cache includes everything the prompt needs about the character so we never
+// need to hit MongoDB per-turn. Adding a field here means bumping the cache key
+// version in session-context.service.ts, or existing cached entries read back
+// without it.
 interface CachedCharacterConfig {
   persona_config: IPersonaConfig;
   personality_sliders: IPersonalitySliders;
+  name: string;
+  mode: string;
+  created_at: string;
 }
 
 async function getCharacterConfig(characterId: string): Promise<CachedCharacterConfig> {
@@ -56,23 +62,32 @@ async function getCharacterConfig(characterId: string): Promise<CachedCharacterC
   if (cached) return cached as CachedCharacterConfig;
 
   const character = await Character.findById(characterId)
-    .select("persona_config personality_sliders")
+    .select("persona_config personality_sliders name mode created_at")
     .lean();
   if (!character) throw new Error(`Character not found: ${characterId}`);
 
   const config: CachedCharacterConfig = {
     persona_config: character.persona_config,
     personality_sliders: character.personality_sliders,
+    name: character.name,
+    mode: character.mode,
+    // Serialized because this round-trips through JSON in Redis; a Date would
+    // come back as a string anyway and the type would be lying.
+    created_at: new Date(character.created_at).toISOString(),
   };
   await cacheCharacterConfig(characterId, config);
   return config;
 }
 
+// Profile fields are optional because sign-in creates the user document before
+// onboarding fills it in. date_of_birth replaces the old is_minor flag: that
+// was written once at onboarding and never recomputed, so a seventeen-year-old
+// stayed restricted forever and nobody ever aged out.
 type PersonalizationUser = {
-  display_name: string;
-  gender: string;
-  communication_style: string;
-  is_minor: boolean;
+  display_name?: string;
+  gender?: string;
+  communication_style?: string;
+  date_of_birth?: Date;
 };
 
 // The only I/O behind personalization. Split out from buildPersonalization() so
@@ -82,7 +97,7 @@ type PersonalizationUser = {
 async function fetchPersonalizationUser(userId: string): Promise<PersonalizationUser | null> {
   try {
     const user = await User.findById(userId)
-      .select("display_name gender communication_style is_minor")
+      .select("display_name gender communication_style date_of_birth")
       .lean();
     return (user as PersonalizationUser | null) ?? null;
   } catch (err) {
@@ -101,11 +116,15 @@ function buildPersonalization(
   if (!user) return null;
 
   return {
-    name: user.display_name,
-    gender: user.gender as UserGender,
-    communicationStyle: user.communication_style as CommunicationStyle,
+    // Reaching here without a name means a client started a conversation
+    // mid-onboarding. Fall back rather than failing the turn — none of these
+    // change what is safe to say.
+    name: user.display_name ?? "there",
+    gender: (user.gender ?? "undisclosed") as UserGender,
+    communicationStyle: (user.communication_style ?? "warm") as CommunicationStyle,
     personalitySliders,
-    isMinor: user.is_minor,
+    // Derived on every turn, never read from a stored snapshot.
+    isMinor: isMinorNow(user.date_of_birth),
     isVoiceMode,
   };
 }
@@ -179,7 +198,7 @@ export async function* streamConversation(
       getCharacterConfig(characterId),
       getSessionContext(sessionId).then((ctx) => ctx ?? EMPTY_CTX),
       checkModeration(message),
-      retrieveMemories(characterId, message).catch((err) => {
+      retrieveMemories(characterId, userId, message).catch((err) => {
         logger.error({ err, characterId }, "Memory retrieval failed — proceeding without memories");
         return "";
       }),
@@ -234,6 +253,11 @@ export async function* streamConversation(
 
   const { messages, total_tokens } = assemblePrompt(
     charConfig.persona_config,
+    {
+      name: charConfig.name,
+      mode: charConfig.mode,
+      knownSince: new Date(charConfig.created_at),
+    },
     sessionCtx,
     message,
     memoryBlock || null,

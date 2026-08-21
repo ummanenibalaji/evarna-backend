@@ -12,6 +12,14 @@ export interface UserPersonalizationContext {
   isMinor?: boolean;
 }
 
+export interface CompanionIdentity {
+  /** The companion's own name — it did not previously know this. */
+  name: string;
+  mode: string;
+  /** When this companion was created, i.e. how long it has known the user. */
+  knownSince: Date;
+}
+
 export interface AssembledPrompt {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   total_tokens: number;
@@ -121,6 +129,46 @@ export function buildPersonalizationBlock(ctx: UserPersonalizationContext): stri
   return lines.join("\n");
 }
 
+// ── Companion self-knowledge ──────────────────────────────────────────────────
+
+// How long the companion has known this person, in the words a person would
+// use. Precision past "a few weeks" is false intimacy — nobody says "we met 43
+// days ago" — so the buckets get coarser as the relationship gets older.
+function relationshipAge(knownSince: Date, now: Date = new Date()): string {
+  const days = Math.floor((now.getTime() - knownSince.getTime()) / 86_400_000);
+  if (days <= 0) return "today — this is your first day together";
+  if (days === 1) return "since yesterday";
+  if (days < 7) return `for ${days} days`;
+  if (days < 14) return "for about a week";
+  if (days < 60) return `for about ${Math.round(days / 7)} weeks`;
+  if (days < 365) return `for about ${Math.round(days / 30)} months`;
+  const years = Math.floor(days / 365);
+  return years === 1 ? "for over a year" : `for over ${years} years`;
+}
+
+/**
+ * What the companion knows about itself.
+ *
+ * Previously it knew none of this: not its own name, not how long it had known
+ * the user. It could recall what the user told it and still not answer "what's
+ * your name?" or "how long have we been talking?" — which reads as a stranger
+ * wearing a familiar voice, and is the single cheapest gap to close.
+ */
+export function buildIdentityBlock(identity: CompanionIdentity, now: Date = new Date()): string {
+  const lines = [
+    `[Who you are]`,
+    `Your name is ${identity.name}. That is the name this person chose for you — answer to it.`,
+    `You have known them ${relationshipAge(identity.knownSince, now)}.`,
+  ];
+  if (identity.mode && identity.mode !== "companion") {
+    lines.push(`You are currently in ${identity.mode} mode.`);
+  }
+  lines.push(
+    `Never claim to have a body, a life outside this conversation, or memories you were not given. Being honest about what you are does not make you any less present for them.`,
+  );
+  return lines.join("\n");
+}
+
 // ── Persona block builder ─────────────────────────────────────────────────────
 
 // Renders the FULL persona, not just system_prompt. Each archetype defines
@@ -165,10 +213,12 @@ export function buildPersonaBlock(persona: IPersonaConfig): string {
 
 // ── Prompt assembly ───────────────────────────────────────────────────────────
 
-// Prompt order: system persona → personalization → memory block →
-//               usage summary → compressed older turns → verbatim recent turns → user message
+// Prompt order: system persona → companion identity → personalization →
+//               memory block → usage summary → compressed older turns →
+//               verbatim recent turns → user message
 export function assemblePrompt(
   persona: IPersonaConfig,
+  identity: CompanionIdentity,
   sessionContext: IRedisSessionContext,
   userMessage: string,
   memoryBlock?: string | null,
@@ -178,6 +228,7 @@ export function assemblePrompt(
   const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
 
   messages.push({ role: "system", content: buildPersonaBlock(persona) });
+  messages.push({ role: "system", content: buildIdentityBlock(identity) });
 
   if (personalization) {
     messages.push({ role: "system", content: buildPersonalizationBlock(personalization) });

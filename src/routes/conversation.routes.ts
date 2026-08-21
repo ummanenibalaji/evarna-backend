@@ -3,12 +3,16 @@ import { z } from "zod";
 import { Types } from "mongoose";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { streamConversation } from "../services/conversation.service.js";
+import { findOwnedSession } from "../services/account.service.js";
+import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
 
+// Neither user_id nor character_id come from the client any more: the user is
+// the token holder, and the character is whatever the session already points
+// at. A client-supplied character_id was a way to write turns into a different
+// companion's history than the session belonged to.
 const SendBodySchema = z.object({
   session_id: z.string().min(1),
-  character_id: z.string().min(1),
-  user_id: z.string().min(1),
   message: z.string().min(1).max(2000),
 });
 
@@ -32,7 +36,14 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const { session_id, character_id, user_id, message } = parsed.data;
+    const { session_id, message } = parsed.data;
+    const user_id = getUserId(request);
+
+    const session = await findOwnedSession(user_id, session_id);
+    if (!session) {
+      return reply.status(404).send({ success: false, error: "Session not found" });
+    }
+    const character_id = session.character_id.toString();
 
     // Take ownership of the raw response for SSE
     reply.hijack();
@@ -87,6 +98,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { session_id: string } }>(
     "/:session_id",
     async (request, reply) => {
+      if (!(await findOwnedSession(getUserId(request), request.params.session_id))) {
+        return reply.status(404).send({ success: false, error: "Session not found" });
+      }
+
       const qParsed = PaginationSchema.safeParse(request.query);
       const { page, limit } = qParsed.success
         ? qParsed.data

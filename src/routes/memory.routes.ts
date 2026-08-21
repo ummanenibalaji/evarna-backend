@@ -2,6 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { Types } from "mongoose";
 import { Memory } from "../models/memory.model.js";
+import { findOwnedCharacter } from "../services/account.service.js";
+import { getUserId } from "../middleware/auth.js";
 
 const TypeFilterSchema = z.object({
   type: z.enum(["fact", "emotion", "event", "preference"]).optional(),
@@ -14,14 +16,18 @@ export async function memoryRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { character_id: string } }>(
     "/:character_id",
     async (request, reply) => {
-      if (!Types.ObjectId.isValid(request.params.character_id)) {
-        return reply.status(400).send({ success: false, error: "Invalid character_id" });
+      const userId = getUserId(request);
+      if (!(await findOwnedCharacter(userId, request.params.character_id))) {
+        // This route used to return anyone's private memories to anyone who
+        // asked for a character id. 404 rather than 403 so ids stay unprobeable.
+        return reply.status(404).send({ success: false, error: "Character not found" });
       }
 
       const qParsed = TypeFilterSchema.safeParse(request.query);
       const typeFilter = qParsed.success ? qParsed.data.type : undefined;
 
       const filter: Record<string, unknown> = {
+        user_id: userId,
         character_id: new Types.ObjectId(request.params.character_id),
         is_deleted: false,
       };
@@ -41,12 +47,14 @@ export async function memoryRoutes(app: FastifyInstance): Promise<void> {
   app.delete<{ Params: { character_id: string } }>(
     "/character/:character_id",
     async (request, reply) => {
-      if (!Types.ObjectId.isValid(request.params.character_id)) {
-        return reply.status(400).send({ success: false, error: "Invalid character_id" });
+      const userId = getUserId(request);
+      if (!(await findOwnedCharacter(userId, request.params.character_id))) {
+        return reply.status(404).send({ success: false, error: "Character not found" });
       }
 
       const result = await Memory.updateMany(
         {
+          user_id: userId,
           character_id: new Types.ObjectId(request.params.character_id),
           is_deleted: false,
         },
@@ -65,11 +73,13 @@ export async function memoryRoutes(app: FastifyInstance): Promise<void> {
     "/:memory_id",
     async (request, reply) => {
       if (!Types.ObjectId.isValid(request.params.memory_id)) {
-        return reply.status(400).send({ success: false, error: "Invalid memory_id" });
+        return reply.status(404).send({ success: false, error: "Memory not found" });
       }
 
-      const memory = await Memory.findByIdAndUpdate(
-        request.params.memory_id,
+      // Scoped by user_id in the filter, so someone else's memory id simply
+      // does not match rather than being found and then rejected.
+      const memory = await Memory.findOneAndUpdate(
+        { _id: request.params.memory_id, user_id: getUserId(request) },
         { $set: { is_deleted: true } },
         { new: true }
       ).lean();

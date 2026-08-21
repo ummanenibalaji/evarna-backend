@@ -5,10 +5,12 @@ import { Session } from "../models/session.model.js";
 import { Character } from "../models/character.model.js";
 import { initSessionContext } from "../services/session-context.service.js";
 import { endSessionById } from "../services/session.service.js";
+import { findOwnedCharacter, findOwnedSession } from "../services/account.service.js";
+import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
 
+// No user_id: the owner is whoever holds the token.
 const StartBodySchema = z.object({
-  user_id: z.string().min(1),
   character_id: z.string().min(1),
   session_type: z.enum(["text", "voice_call", "voice_note"]),
 });
@@ -33,7 +35,15 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const { user_id, character_id, session_type } = parsed.data;
+    const { character_id, session_type } = parsed.data;
+    const user_id = getUserId(request);
+
+    // You cannot start a session against someone else's companion. Without
+    // this the character_id was an unchecked parameter that would have written
+    // turns and memories into another user's relationship.
+    if (!(await findOwnedCharacter(user_id, character_id))) {
+      return reply.status(404).send({ success: false, error: "Character not found" });
+    }
 
     const session = await Session.create({
       user_id,
@@ -65,6 +75,10 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       ? new Date(parsed.data.ended_at)
       : new Date();
 
+    if (!(await findOwnedSession(getUserId(request), request.params.id))) {
+      return reply.status(404).send({ success: false, error: "Session not found or already ended" });
+    }
+
     const duration_seconds = await endSessionById(request.params.id, "completed", endedAt);
 
     if (duration_seconds === null) {
@@ -81,6 +95,11 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { character_id: string } }>(
     "/character/:character_id",
     async (request, reply) => {
+      const userId = getUserId(request);
+      if (!(await findOwnedCharacter(userId, request.params.character_id))) {
+        return reply.status(404).send({ success: false, error: "Character not found" });
+      }
+
       const qParsed = PaginationSchema.safeParse(request.query);
       const { page, limit } = qParsed.success
         ? qParsed.data
