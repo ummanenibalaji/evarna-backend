@@ -47,6 +47,15 @@ export async function endSessionById(
     );
   }
 
+  // A session the user asked us not to remember must leave nothing behind.
+  // The turns themselves still exist (they are the transcript the user just
+  // had, and account deletion removes them), but nothing is distilled into
+  // long-term memory, which is what "nothing will be saved" promises.
+  if (session.memory_enabled === false) {
+    logger.info({ sessionId }, "endSessionById: session opted out of memory — skipping extraction");
+    return duration_seconds;
+  }
+
   void enqueueMemoryExtraction({
     sessionId,
     characterId: session.character_id.toString(),

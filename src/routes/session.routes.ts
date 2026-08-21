@@ -13,6 +13,9 @@ import { logger } from "../utils/logger.js";
 const StartBodySchema = z.object({
   character_id: z.string().min(1),
   session_type: z.enum(["text", "voice_call", "voice_note"]),
+  // Studio offers this per session. Absent means remember, which is what every
+  // companion session wants and what the old behaviour was.
+  remember: z.boolean().default(true),
 });
 
 const EndBodySchema = z.object({
@@ -35,7 +38,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const { character_id, session_type } = parsed.data;
+    const { character_id, session_type, remember } = parsed.data;
     const user_id = getUserId(request);
 
     // You cannot start a session against someone else's companion. Without
@@ -54,6 +57,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       // client-supplied mode would let a companion session be labelled studio
       // and vice versa, which would misfile its memories.
       mode: owned.mode,
+      memory_enabled: remember,
       status: "active",
       started_at: new Date(),
     });

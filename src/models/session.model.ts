@@ -27,6 +27,10 @@ const sessionSchema = new Schema<ISession>(
     ended_at: { type: Date, default: null },
     duration_seconds: { type: Number, default: 0 },
     voice_minutes_consumed: { type: Number, default: 0 },
+    // Studio's "Remember this session" toggle. When false, ending the session
+    // does not enqueue memory extraction, so nothing from it is ever written to
+    // long-term memory. Defaults true — companions always remember.
+    memory_enabled: { type: Boolean, default: true },
     status: {
       type: String,
       enum: ["active", "completed", "interrupted"],

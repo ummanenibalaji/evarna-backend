@@ -19,6 +19,7 @@ export interface ISession {
   ended_at: Date | null;
   duration_seconds: number;
   voice_minutes_consumed: number;
+  memory_enabled: boolean;
   status: SessionStatus;
   summary: ISessionSummary | null;
 }
