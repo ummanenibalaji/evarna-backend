@@ -210,6 +210,22 @@ async function deliver(
  */
 const CRISIS_CHECKIN_MARKER = "__crisis_checkin__";
 
+/**
+ * Everyone with a crisis inside the silence window.
+ *
+ * This exists because the check-in cannot be driven off the follow-up queue.
+ * The first sweep after a crisis suppresses every pending hint, so by the time
+ * the check-in is due that user has nothing pending and a queue-driven loop
+ * never reaches them — the one message that matters most would never fire.
+ * Found by the smoke check, which is the only reason it is not still true.
+ */
+async function usersInCrisisWindow(now: Date): Promise<string[]> {
+  return ConversationTurn.distinct("user_id", {
+    "safety_flags.is_crisis": true,
+    created_at: { $gte: new Date(now.getTime() - CRISIS_SILENCE_DAYS * DAY_MS) },
+  });
+}
+
 async function lastCrisisTurn(userId: string, now: Date) {
   return ConversationTurn.findOne({
     user_id: userId,
@@ -302,6 +318,18 @@ export interface SweepResult {
 export async function runOutreachSweep(now = new Date()): Promise<SweepResult> {
   const result: SweepResult = { due: 0, sent: 0, skipped: 0, expired: 0 };
 
+  // Crisis users first, and independently of the queue — see usersInCrisisWindow.
+  const crisisUsers = new Set<string>();
+  for (const userId of await usersInCrisisWindow(now)) {
+    crisisUsers.add(userId);
+    try {
+      const crisis = await lastCrisisTurn(userId, now);
+      if (crisis) await handleCrisisUser(userId, crisis, now);
+    } catch (err) {
+      logger.error({ err, userId }, "outreach: crisis handling failed");
+    }
+  }
+
   const due = await FollowUp.find({ status: "pending", trigger_date: { $lte: now } })
     .sort({ trigger_date: 1 })
     .limit(MAX_SENDS_PER_SWEEP * 4)
@@ -322,10 +350,9 @@ export async function runOutreachSweep(now = new Date()): Promise<SweepResult> {
     if (result.sent >= MAX_SENDS_PER_SWEEP) break;
 
     try {
-      // 1. Crisis takes precedence over everything, including expiry.
-      const crisis = await lastCrisisTurn(userId, now);
-      if (crisis) {
-        await handleCrisisUser(userId, crisis, now);
+      // 1. Crisis users were handled above, including suppressing their queue.
+      //    Anything of theirs still showing as due is a race; skip it.
+      if (crisisUsers.has(userId)) {
         result.skipped += hints.length;
         continue;
       }
@@ -343,45 +370,67 @@ export async function runOutreachSweep(now = new Date()): Promise<SweepResult> {
       }
       if (fresh.length === 0) continue;
 
+      // 3. Drop anything whose companion has been deleted or deactivated.
+      //
+      //    This is a VALIDITY check, so it runs before the deliverability
+      //    checks below. Ordered the other way, a user with no device never
+      //    reached it and dead hints sat in the queue until they expired —
+      //    harmless, since nothing is sent either way, but the queue should
+      //    clean itself regardless of whether anyone has a phone attached.
+      const charIds = [...new Set(fresh.map((h) => h.character_id.toString()))];
+      const activeIds = new Set(
+        (
+          await Character.find({ _id: { $in: charIds }, is_active: true })
+            .select("_id")
+            .lean()
+        ).map((c) => c._id.toString()),
+      );
+
+      const live = [];
+      for (const h of fresh) {
+        if (activeIds.has(h.character_id.toString())) {
+          live.push(h);
+        } else {
+          await FollowUp.updateOne({ _id: h._id }, { $set: { status: "suppressed" } });
+          result.skipped++;
+        }
+      }
+      if (live.length === 0) continue;
+
       const user = await User.findById(userId)
         .select("push_token timezone last_active_at")
         .lean();
 
-      // 3. No device, no message. Leave the hint pending — they may grant
+      // 4. No device, no message. Leave the hint pending — they may grant
       //    permission later and it is still fresh until it expires.
-      if (!user?.push_token) { result.skipped += fresh.length; continue; }
+      if (!user?.push_token) { result.skipped += live.length; continue; }
 
-      // 4. Quiet hours. Also leaves it pending: a later sweep sends it.
-      if (isQuietHours(user.timezone, now)) { result.skipped += fresh.length; continue; }
+      // 5. Quiet hours. Also leaves it pending: a later sweep sends it.
+      if (isQuietHours(user.timezone, now)) { result.skipped += live.length; continue; }
 
-      // 5. Someone who has been in the app today does not need chasing.
+      // 6. Someone who has been in the app today does not need chasing.
       const lastActive = user.last_active_at?.getTime() ?? 0;
       if (now.getTime() - lastActive < RECENT_ACTIVITY_HOURS * HOUR_MS) {
-        result.skipped += fresh.length;
+        result.skipped += live.length;
         continue;
       }
 
-      // 6. Daily cap, derived from what was actually sent rather than a
+      // 7. Daily cap, derived from what was actually sent rather than a
       //    counter that could drift out of sync with reality.
       const sentToday = await FollowUp.countDocuments({
         user_id: userId,
         status: "sent",
         sent_at: { $gte: new Date(now.getTime() - DAY_MS) },
       });
-      if (sentToday >= MAX_OUTREACH_PER_DAY) { result.skipped += fresh.length; continue; }
+      if (sentToday >= MAX_OUTREACH_PER_DAY) { result.skipped += live.length; continue; }
 
-      // Oldest trigger first — it has been waiting longest.
-      const chosen = fresh[0]!;
+      // Oldest trigger first — it has been waiting longest. Its companion was
+      // confirmed active in step 3.
+      const chosen = live[0]!;
       const character = await Character.findById(chosen.character_id)
-        .select("name persona_config mode is_active")
+        .select("name persona_config mode")
         .lean();
-
-      // A deleted or deactivated companion should not still be messaging.
-      if (!character?.is_active) {
-        await FollowUp.updateOne({ _id: chosen._id }, { $set: { status: "suppressed" } });
-        result.skipped++;
-        continue;
-      }
+      if (!character) { result.skipped++; continue; }
 
       const message = await writeOutreachMessage(
         character.name,

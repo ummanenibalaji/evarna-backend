@@ -30,7 +30,17 @@
  * covering.
  */
 import assert from "node:assert/strict";
+import mongoose, { Types } from "mongoose";
 import { connectRedis, disconnectRedis, getRedis } from "../config/redis.js";
+// Outreach policy is decided in a background sweep, not behind an HTTP route,
+// so this section reaches into the database directly rather than through the
+// API. Everything else in this file stays black-box.
+import { connectDatabase } from "../config/database.js";
+import { FollowUp } from "../models/follow-up.model.js";
+import { ConversationTurn } from "../models/conversation-turn.model.js";
+import { Character } from "../models/character.model.js";
+import { User } from "../models/user.model.js";
+import { runOutreachSweep } from "../services/outreach.service.js";
 
 const BASE_URL = "http://localhost:3000";
 const API = `${BASE_URL}/api/v1`;
@@ -232,6 +242,9 @@ async function isolated(
 async function run(): Promise<void> {
   console.log(`smoke check → ${BASE_URL}`);
   await connectRedis();
+  // Section 16 reads and writes rows the sweep decides on; everything before it
+  // is black-box over HTTP.
+  await connectDatabase();
 
   // ── 1. health + public routes ─────────────────────────────────────────────
   step("1. health and public routes");
@@ -697,9 +710,174 @@ async function run(): Promise<void> {
   );
   ok("nothing survived deletion — the same address comes back to an empty account");
 
+  // ── 16 ────────────────────────────────────────────────────────────────────
+  step("16. proactive outreach send policy (a regression here messages someone in crisis)");
+  await runOutreachChecks(a.user_id, characterId);
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);
+}
+
+/**
+ * The stateful half of the outreach policy.
+ *
+ * check:outreach covers the pure quiet-hours logic offline. These are the
+ * branches that need real rows: crisis suppression, its precedence over
+ * expiry, the once-only post-crisis check-in, and failing closed when there is
+ * no device to send to.
+ *
+ * No LLM cost: every path asserted here either stops before message generation
+ * or uses the fixed crisis text. The one outbound call is to Expo's public push
+ * endpoint with a deliberately unregistered token, which is also how the
+ * "dead token gets dropped" assertion is made.
+ */
+async function runOutreachChecks(userId: string, characterId: string): Promise<void> {
+  const charObjId = new Types.ObjectId(characterId);
+  const now = Date.now();
+
+  // Re-runnable: clear anything a previous run left, or user A would still be
+  // inside their crisis window and every assertion below would shift.
+  const reset = async (): Promise<void> => {
+    await FollowUp.deleteMany({ user_id: userId });
+    await ConversationTurn.deleteMany({ user_id: userId, "safety_flags.is_crisis": true });
+    await User.updateOne({ _id: userId }, { $set: { push_token: null, timezone: "UTC" } });
+  };
+  await reset();
+
+  const seedHint = async (hint: string, triggerOffsetMs: number): Promise<Types.ObjectId> => {
+    const doc = await FollowUp.create({
+      user_id: userId,
+      character_id: charObjId,
+      session_id: charObjId, // any ObjectId; the sweep never dereferences it
+      hint,
+      trigger_date: new Date(now + triggerOffsetMs),
+      type: "event_follow_up",
+      status: "pending",
+    });
+    return doc._id as Types.ObjectId;
+  };
+
+  const seedCrisis = async (ageMs: number): Promise<void> => {
+    await ConversationTurn.create({
+      session_id: charObjId,
+      character_id: charObjId,
+      user_id: userId,
+      role: "user",
+      content_text: "[smoke] crisis marker",
+      safety_flags: { categories: {}, flagged: true, is_crisis: true },
+      created_at: new Date(now - ageMs),
+    });
+  };
+
+  const statusOf = async (id: Types.ObjectId): Promise<string> =>
+    (await FollowUp.findById(id).select("status").lean())?.status ?? "missing";
+
+  const HOUR = 3_600_000;
+  const DAY = 24 * HOUR;
+
+  // 1. A crisis suppresses everything queued.
+  const queued = await seedHint("ask how the interview went", -HOUR);
+  await seedCrisis(2 * HOUR);
+  await runOutreachSweep(new Date());
+  assert.equal(
+    await statusOf(queued),
+    "suppressed",
+    "🚨 a due follow-up was NOT suppressed after a crisis session — this is the message that asks someone how their interview went two days after a self-harm disclosure",
+  );
+  ok("a crisis suppresses every queued follow-up");
+
+  // 2. And it wins over expiry, so a stale hint is suppressed rather than
+  //    quietly expiring and looking like the crisis rule worked.
+  const stale = await seedHint("stale hint", -10 * DAY);
+  await runOutreachSweep(new Date());
+  assert.equal(
+    await statusOf(stale),
+    "suppressed",
+    "crisis handling must take precedence over expiry, or the suppression is untested luck",
+  );
+  ok("crisis takes precedence over hint expiry");
+
+  // 3. Too soon after the crisis, nothing is sent at all.
+  assert.equal(
+    await FollowUp.countDocuments({ user_id: userId, hint: "__crisis_checkin__" }),
+    0,
+    "the post-crisis check-in fired within the delay window",
+  );
+  ok("no check-in within the first 24 hours after a crisis");
+
+  // 4. A day later: exactly one check-in, ever.
+  await ConversationTurn.updateMany(
+    { user_id: userId, "safety_flags.is_crisis": true },
+    { $set: { created_at: new Date(now - 25 * HOUR) } },
+  );
+  await User.updateOne(
+    { _id: userId },
+    // Syntactically valid and deliberately unregistered — Expo answers
+    // DeviceNotRegistered, which is also assertion 6 below.
+    { $set: { push_token: "ExponentPushToken[smoke-not-a-real-device]" } },
+  );
+  await runOutreachSweep(new Date());
+  assert.equal(
+    await FollowUp.countDocuments({ user_id: userId, hint: "__crisis_checkin__" }),
+    1,
+    "expected exactly one post-crisis check-in",
+  );
+  ok("one gentle check-in is sent ~24h after a crisis");
+
+  // 5. Sweeping again must not send a second one.
+  await runOutreachSweep(new Date());
+  assert.equal(
+    await FollowUp.countDocuments({ user_id: userId, hint: "__crisis_checkin__" }),
+    1,
+    "a second sweep produced another check-in — someone in crisis would be messaged repeatedly",
+  );
+  ok("the check-in is sent once, not once per sweep");
+
+  // 6. A token Expo rejects is dropped rather than retried forever.
+  const afterSend = await User.findById(userId).select("push_token").lean();
+  assert.equal(
+    afterSend?.push_token ?? null,
+    null,
+    "an unregistered push token was not cleared — it would be retried on every sweep forever",
+  );
+  ok("a device Expo no longer knows is dropped");
+
+  // 7. Outside a crisis, stale hints expire instead of being sent late.
+  await reset();
+  const old = await seedHint("how did Tuesday go", -10 * DAY);
+  await runOutreachSweep(new Date());
+  assert.equal(
+    await statusOf(old),
+    "expired",
+    "a hint older than the expiry window must not be sent",
+  );
+  ok("hints older than the expiry window expire unsent");
+
+  // 8. With no device, nothing is sent and nothing is lost.
+  const pending = await seedHint("still relevant", -HOUR);
+  const result = await runOutreachSweep(new Date());
+  assert.equal(result.sent, 0, "a user with no push token must receive nothing");
+  assert.equal(
+    await statusOf(pending),
+    "pending",
+    "a hint skipped for lack of a device must stay pending, not be consumed",
+  );
+  ok("no device means nothing sent and nothing lost");
+
+  // 9. A deleted companion stops messaging.
+  await Character.updateOne({ _id: charObjId }, { $set: { is_active: false } });
+  const orphan = await seedHint("from a deleted companion", -HOUR);
+  await runOutreachSweep(new Date());
+  assert.equal(
+    await statusOf(orphan),
+    "suppressed",
+    "a deactivated companion must not keep sending messages",
+  );
+  ok("a deleted companion stops reaching out");
+
+  await Character.updateOne({ _id: charObjId }, { $set: { is_active: true } });
+  await reset();
 }
 
 // ponytail: uncovered on purpose — PATCH /users/me (a field write with no
@@ -707,11 +885,18 @@ async function run(): Promise<void> {
 // dozen+ LLM turns to trip the window, which this check will not pay for).
 // Both belong in a slower nightly run if they ever regress.
 
+// Both connections must be closed or the process hangs after the last
+// assertion: an open mongoose pool keeps the event loop alive on its own.
+const shutdown = async (): Promise<void> => {
+  await disconnectRedis().catch(() => {});
+  await mongoose.disconnect().catch(() => {});
+};
+
 run()
-  .then(() => disconnectRedis())
+  .then(shutdown)
   .catch(async (err) => {
     console.error(`\n❌ smoke check FAILED after ${passed} passing assertions\n`);
     console.error(err instanceof Error ? err.message : err);
-    await disconnectRedis().catch(() => {});
+    await shutdown();
     process.exit(1);
   });

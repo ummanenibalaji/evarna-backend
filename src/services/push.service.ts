@@ -13,6 +13,8 @@ import { logger } from "../utils/logger.js";
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
+const PUSH_TIMEOUT_MS = 10_000;
+
 export type PushResult =
   /** Expo accepted the message. */
   | "ok"
@@ -50,6 +52,10 @@ export async function sendPush(input: PushInput): Promise<PushResult> {
   // path once the scheduler fans out to more than a handful of users per tick —
   // batch there, and read the receipts endpoint for per-ticket outcomes.
   const res = await fetch(EXPO_PUSH_URL, {
+      // Without this a single hung request stalls the sweep forever, and with
+      // it the whole outreach queue stops moving. 10s is generous for a JSON
+      // POST; a slow push is not worth blocking every other user\'s message.
+      signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
     method: "POST",
     headers: {
       "Content-Type": "application/json",
