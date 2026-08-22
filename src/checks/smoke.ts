@@ -723,6 +723,41 @@ async function run(): Promise<void> {
   step("18. the companion adapts only when asked, and only once a week");
   await runAdaptationChecks(a.token, a.user_id, characterId, reborn.token);
 
+  // ── 19 ────────────────────────────────────────────────────────────────────
+  step("19. the streak and the week strip are the user's own, not constants");
+
+  const acted = await api<{
+    streak_days: number; best_streak: number; week_minutes: number[];
+    week_total_minutes: number; prev_week_total_minutes: number; active_days: number;
+  }>("GET", "/users/me/activity", a.token);
+  assert.equal(acted.status, 200);
+  const act = acted.json.data!;
+  assert.equal(act.week_minutes.length, 7, "the week strip needs exactly seven bars");
+  assert.ok(act.active_days >= 1, "a user who has held sessions shows no active days");
+  assert.ok(act.streak_days >= 1, "a session today did not register as a streak");
+  assert.ok(act.best_streak >= act.streak_days, "the personal best cannot be below the live streak");
+  ok(`activity reflects real sessions (streak ${act.streak_days}, ${act.active_days} active days)`);
+
+  // The whole point. This screen used to show a 12-day streak and a personal
+  // best of 21 to an account created seconds ago.
+  const fresh = await api<{
+    streak_days: number; best_streak: number; week_minutes: number[]; active_days: number;
+  }>("GET", "/users/me/activity", reborn.token);
+  assert.equal(fresh.status, 200);
+  assert.deepEqual(
+    fresh.json.data,
+    {
+      streak_days: 0,
+      best_streak: 0,
+      week_minutes: [0, 0, 0, 0, 0, 0, 0],
+      week_total_minutes: 0,
+      prev_week_total_minutes: 0,
+      active_days: 0,
+    },
+    "a brand-new account was shown activity it has not had",
+  );
+  ok("a brand-new account sees zeros, not a fabricated streak");
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);

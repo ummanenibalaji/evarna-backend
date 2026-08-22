@@ -11,6 +11,7 @@ import {
 } from "../services/character.service.js";
 import { deleteAccount, exportAccount } from "../services/account.service.js";
 import { revokeAllSessions } from "../services/auth.service.js";
+import { getActivity } from "../services/activity.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { isMinorNow, isUnderMinimumAge, MIN_AGE_YEARS } from "../utils/age.js";
 import { logger } from "../utils/logger.js";
@@ -183,6 +184,15 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       }
       throw err;
     }
+  });
+
+  // GET /api/v1/users/me/activity — streak and the week strip, computed in the
+  // user's own timezone. These were rendered from constants in the app's config
+  // file (a 12-day streak, a best of 21, seven invented bars) shown identically
+  // to every user.
+  app.get("/me/activity", async (request, reply) => {
+    const activity = await getActivity(getUserId(request));
+    return reply.send({ success: true, data: activity });
   });
 
   // GET /api/v1/users/me/stats — aggregate counts across the user's companions
