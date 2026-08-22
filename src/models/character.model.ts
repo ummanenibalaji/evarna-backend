@@ -22,6 +22,39 @@ const personalitySlidersSchema = new Schema(
   { _id: false }
 );
 
+// Phase C. Nothing here is required: a character with no adaptation state has
+// simply never been offered anything, which is the normal case.
+const adaptationSchema = new Schema(
+  {
+    suggestion: {
+      type: new Schema(
+        {
+          memory_id: { type: String, required: true },
+          trait: { type: String, required: true },
+          direction: { type: String, enum: ["up", "down"], required: true },
+          offered_at: { type: Date, required: true },
+        },
+        { _id: false }
+      ),
+      default: undefined,
+    },
+    last_offered_at: { type: Date },
+    handled_memory_ids: [{ type: String }],
+    recent_change: {
+      type: new Schema(
+        {
+          trait: { type: String, required: true },
+          direction: { type: String, enum: ["up", "down"], required: true },
+          at: { type: Date, required: true },
+        },
+        { _id: false }
+      ),
+      default: undefined,
+    },
+  },
+  { _id: false }
+);
+
 const voiceConfigSchema = new Schema(
   {
     speed: { type: Number, default: 1.0 },
@@ -70,6 +103,7 @@ const characterSchema = new Schema<ICharacter>(
     avatar_source: { type: String, enum: ["preset"], default: "preset" },
     persona_config: { type: personaConfigSchema, required: true },
     personality_sliders: { type: personalitySlidersSchema, default: () => ({}) },
+    adaptation: { type: adaptationSchema, default: () => ({}) },
     memory_enabled: { type: Boolean, default: true },
     is_active: { type: Boolean, default: true },
     created_at: { type: Date, default: () => new Date() },

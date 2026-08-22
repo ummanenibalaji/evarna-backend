@@ -40,6 +40,7 @@ import { FollowUp } from "../models/follow-up.model.js";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { Character } from "../models/character.model.js";
 import { User } from "../models/user.model.js";
+import { Memory } from "../models/memory.model.js";
 import { runOutreachSweep } from "../services/outreach.service.js";
 
 const BASE_URL = "http://localhost:3000";
@@ -718,6 +719,10 @@ async function run(): Promise<void> {
   step("17. a reply that lands while you are away still reaches you");
   await runUnreadReplyChecks(a.token, a.user_id, characterId);
 
+  // ── 18 ────────────────────────────────────────────────────────────────────
+  step("18. the companion adapts only when asked, and only once a week");
+  await runAdaptationChecks(a.token, a.user_id, characterId, reborn.token);
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);
@@ -790,9 +795,18 @@ async function runUnreadReplyChecks(
   );
   ok("the reply is generated and persisted anyway");
 
-  const after = await User.findById(userId).select("push_token").lean();
+  // Polled, not read once. The notification is fired after the turn is
+  // persisted, so the loop above can see the reply before the push has left the
+  // process — reading immediately made this assertion a coin flip.
+  let cleared: string | null = "not-checked";
+  for (let i = 0; i < 12; i++) {
+    const after = await User.findById(userId).select("push_token").lean();
+    cleared = after?.push_token ?? null;
+    if (cleared === null) break;
+    await sleep(1000);
+  }
   assert.equal(
-    after?.push_token ?? null,
+    cleared,
     null,
     "the unread-reply notification never reached Expo — the answer would sit unread with nothing to announce it",
   );
@@ -960,6 +974,140 @@ async function runOutreachChecks(userId: string, characterId: string): Promise<v
 
   await Character.updateOne({ _id: charObjId }, { $set: { is_active: true } });
   await reset();
+}
+
+/**
+ * Phase C — a preference the user stated becomes an offer, and only an offer.
+ *
+ * The offline check covers which suggestion gets picked. What needs a database
+ * is everything after the tap: that the slider actually moves, that the weekly
+ * cap survives a restart, that a second tap cannot apply it twice, and that
+ * the cached persona is dropped so the change reaches the model.
+ */
+async function runAdaptationChecks(
+  token: string,
+  userId: string,
+  characterId: string,
+  otherToken: string,
+): Promise<void> {
+  const charObjId = new Types.ObjectId(characterId);
+
+  // A real embedding shape so nothing downstream chokes on it; the values do
+  // not matter because adaptation never runs a vector search.
+  const embedding = Array.from({ length: 1536 }, () => 0.001);
+  const seedHint = async (content: string, trait: string, direction: string) =>
+    (
+      await Memory.create({
+        user_id: userId,
+        character_id: charObjId,
+        content,
+        type: "preference",
+        sentiment: "neutral",
+        embedding,
+        source_session_id: new Types.ObjectId(),
+        related_entities: [],
+        slider_hint: { trait, direction },
+      })
+    )._id.toString();
+
+  const seeded: string[] = [];
+  try {
+    // Start from a known middle so the arithmetic below is unambiguous.
+    await Character.updateOne(
+      { _id: charObjId },
+      { $set: { "personality_sliders.directness": 50, adaptation: {} } },
+    );
+
+    const first = await seedHint("user prefers direct feedback over softening", "directness", "up");
+    seeded.push(first);
+
+    const offer = await api<{ suggestion: { memory_id: string; trait: string; from: number; to: number; phrase: string } | null }>(
+      "GET", `/characters/${characterId}/suggestion`, token,
+    );
+    assert.equal(offer.status, 200);
+    const s1 = offer.json.data!.suggestion;
+    assert.ok(s1, "a preference memory with a slider hint produced no offer");
+    assert.equal(s1.memory_id, first);
+    assert.equal(s1.trait, "directness");
+    assert.equal(s1.from, 50);
+    assert.equal(s1.to, 70);
+    assert.equal(s1.phrase, "more direct");
+    ok("a stated preference becomes a one-tap offer");
+
+    // Nothing has been applied yet. If merely showing the offer moved the
+    // slider, the app would be editing the companion behind the user's back.
+    const untouched = await Character.findById(charObjId).select("personality_sliders").lean();
+    assert.equal(
+      untouched?.personality_sliders.directness,
+      50,
+      "seeing a suggestion changed the companion — it must be an offer, not a drift",
+    );
+    ok("showing the offer changes nothing on its own");
+
+    // A newer, different preference must NOT replace an offer already on screen.
+    const second = await seedHint("user asked to be talked to more gently", "warmth", "up");
+    seeded.push(second);
+    const again = await api<{ suggestion: { memory_id: string } | null }>(
+      "GET", `/characters/${characterId}/suggestion`, token,
+    );
+    assert.equal(again.json.data!.suggestion?.memory_id, first, "an outstanding offer was replaced before it was answered");
+    ok("an unanswered offer stays put");
+
+    // Someone else asking about this companion learns nothing.
+    const nosy = await api<{ suggestion: unknown }>(
+      "GET", `/characters/${characterId}/suggestion`, otherToken,
+    );
+    assert.equal(nosy.json.data?.suggestion ?? null, null, "another user was shown this companion's suggestion");
+    const forged = await api("POST", `/characters/${characterId}/suggestion`, otherToken, {
+      memory_id: first, action: "apply",
+    });
+    assert.equal(forged.status, 409, "another user was able to retune this companion");
+    ok("no one else can see or answer this companion's offer");
+
+    // The tap.
+    const applied = await api<{ personality_sliders: { directness: number } }>(
+      "POST", `/characters/${characterId}/suggestion`, token, { memory_id: first, action: "apply" },
+    );
+    assert.equal(applied.status, 200);
+    assert.equal(applied.json.data!.personality_sliders.directness, 70);
+    const moved = await Character.findById(charObjId).select("personality_sliders adaptation").lean();
+    assert.equal(moved?.personality_sliders.directness, 70, "the tap did not reach the database");
+    assert.equal(moved?.adaptation?.recent_change?.trait, "directness");
+    assert.equal(moved?.adaptation?.recent_change?.direction, "up");
+    ok("accepting moves the slider and records that it was asked for");
+
+    // The cached persona holds sliders AND the recent-change line. If it
+    // survives, the model keeps the old personality for up to an hour.
+    const cached = await getRedis().get(`character_config:v4:${characterId}`);
+    assert.equal(cached, null, "the cached persona survived a personality change");
+    ok("the change reaches the model immediately, not after a cache expiry");
+
+    const twice = await api("POST", `/characters/${characterId}/suggestion`, token, {
+      memory_id: first, action: "apply",
+    });
+    assert.equal(twice.status, 409, "the same suggestion applied twice would move the slider 40 points");
+    const stillSeventy = await Character.findById(charObjId).select("personality_sliders").lean();
+    assert.equal(stillSeventy?.personality_sliders.directness, 70);
+    ok("a double tap cannot apply the same suggestion twice");
+
+    // C3. The second seeded hint is outstanding and unanswered, but the week is
+    // not up — a companion that asks to be reconfigured repeatedly is exhausting.
+    const capped = await api<{ suggestion: unknown }>(
+      "GET", `/characters/${characterId}/suggestion`, token,
+    );
+    assert.equal(capped.json.data?.suggestion ?? null, null, "a second suggestion was offered inside the same week");
+    ok("at most one suggestion a week");
+
+    // …and the cap is stored, not held in memory, so a restart does not reset it.
+    const state = await Character.findById(charObjId).select("adaptation").lean();
+    assert.ok(state?.adaptation?.last_offered_at, "the weekly cap is not persisted");
+    assert.deepEqual(state?.adaptation?.handled_memory_ids, [first], "the answered memory was not retired");
+    ok("the cap and the answered memory survive a restart");
+  } finally {
+    // These are hand-seeded rows with fake embeddings — leaving them behind
+    // would put junk vectors in the same index real recall searches.
+    if (seeded.length) await Memory.deleteMany({ _id: { $in: seeded } });
+  }
 }
 
 // ponytail: uncovered on purpose — PATCH /users/me (a field write with no

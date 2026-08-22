@@ -10,6 +10,7 @@ import {
 import { invalidateCharacterConfig } from "../services/session-context.service.js";
 import { getVoice } from "../data/voices.js";
 import { getUserId } from "../middleware/auth.js";
+import { getSuggestion, resolveSuggestion } from "../services/adaptation.service.js";
 
 // No `user_id` field: the owner is whoever holds the token.
 const CreateBodySchema = z.object({
@@ -31,6 +32,11 @@ const UpdateBodySchema = z.object({
       formality: z.number().min(0).max(100).optional(),
     })
     .optional(),
+});
+
+const ResolveSuggestionSchema = z.object({
+  memory_id: z.string().min(1),
+  action: z.enum(["apply", "dismiss"]),
 });
 
 export async function characterRoutes(app: FastifyInstance): Promise<void> {
@@ -104,6 +110,10 @@ export async function characterRoutes(app: FastifyInstance): Promise<void> {
           archetype: c.archetype,
           gender: c.gender,
           voice_id: c.voice_id,
+          // The edit screen initialised its sliders to hardcoded defaults
+          // because this was never sent. Any edit then saved those defaults
+          // over the companion's real personality.
+          personality_sliders: c.personality_sliders,
           is_active: c.is_active,
           last_interaction_at: c.last_interaction_at,
           total_sessions: c.total_sessions,
@@ -196,6 +206,54 @@ export async function characterRoutes(app: FastifyInstance): Promise<void> {
     await invalidateCharacterConfig(id);
 
     return reply.send({ success: true, data: updated });
+  });
+
+  // GET /api/v1/characters/:id/suggestion — the one adjustment worth offering,
+  // or null. See adaptation.service.ts for why this is an offer and not a drift.
+  //
+  // Reading is what starts the weekly cooldown, so a client must not poll this
+  // speculatively — it is fetched when the user opens the companion profile.
+  app.get<{ Params: { id: string } }>("/:id/suggestion", async (request, reply) => {
+    const suggestion = await getSuggestion(getUserId(request), request.params.id);
+    return reply.send({ success: true, data: { suggestion } });
+  });
+
+  // POST /api/v1/characters/:id/suggestion — answer it.
+  //
+  // One route for both answers rather than two: "apply" and "dismiss" differ
+  // only in whether the slider moves, and both retire the memory.
+  app.post<{ Params: { id: string } }>("/:id/suggestion", async (request, reply) => {
+    const parsed = ResolveSuggestionSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? "Invalid input",
+        code: "VALIDATION_ERROR",
+      });
+    }
+
+    const result = await resolveSuggestion(
+      getUserId(request),
+      request.params.id,
+      parsed.data.memory_id,
+      parsed.data.action,
+    );
+
+    // No outstanding offer matching that memory — a stale screen, or a second
+    // tap. 409 rather than 200 so the client knows to refetch instead of
+    // believing a change happened.
+    if (!result) {
+      return reply.status(409).send({
+        success: false,
+        error: "That suggestion is no longer outstanding",
+        code: "SUGGESTION_STALE",
+      });
+    }
+
+    return reply.send({
+      success: true,
+      data: { personality_sliders: result.sliders },
+    });
   });
 
   // DELETE /api/v1/characters/:id — soft delete.

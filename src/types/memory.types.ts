@@ -2,6 +2,17 @@ import type { Types } from "mongoose";
 
 export type MemoryType = "fact" | "emotion" | "event" | "preference";
 
+/**
+ * Set only on `preference` memories, and only when the preference maps cleanly
+ * onto one of the five personality sliders. It is produced by the extraction
+ * call that was already running, so it costs no extra request — see
+ * memory-extraction.service.ts.
+ */
+export interface ISliderHint {
+  trait: "warmth" | "humor" | "directness" | "energy" | "formality";
+  direction: "up" | "down";
+}
+
 export interface IFollowUpHint {
   hint: string;
   trigger_date: Date;
@@ -24,6 +35,7 @@ export interface IMemory {
   embedding: number[];   // 1536 floats — text-embedding-3-small
   source_session_id: Types.ObjectId;
   related_entities: string[];
+  slider_hint?: ISliderHint | null;
   access_count: number;
   last_accessed_at: Date;
   is_deleted: boolean;

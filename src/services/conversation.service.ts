@@ -11,6 +11,7 @@ import {
   getCachedCharacterConfig,
 } from "./session-context.service.js";
 import { assemblePrompt } from "./prompt.service.js";
+import { phraseFor } from "./adaptation.service.js";
 import type { UserPersonalizationContext } from "./prompt.service.js";
 import { compressIfNeeded } from "./context-compression.service.js";
 import { retrieveMemories } from "./memory-retrieval.service.js";
@@ -57,6 +58,8 @@ interface CachedCharacterConfig {
   mode: string;
   created_at: string;
   studio?: { kind: "scenario" | "custom"; scenarioName?: string };
+  // Serialized like created_at — this round-trips through JSON in Redis.
+  recent_change?: { phrase: string; at: string };
 }
 
 async function getCharacterConfig(characterId: string): Promise<CachedCharacterConfig> {
@@ -64,7 +67,7 @@ async function getCharacterConfig(characterId: string): Promise<CachedCharacterC
   if (cached) return cached as CachedCharacterConfig;
 
   const character = await Character.findById(characterId)
-    .select("persona_config personality_sliders name mode created_at studio_config")
+    .select("persona_config personality_sliders name mode created_at studio_config adaptation.recent_change")
     .lean();
   if (!character) throw new Error(`Character not found: ${characterId}`);
 
@@ -76,6 +79,19 @@ async function getCharacterConfig(characterId: string): Promise<CachedCharacterC
     // Serialized because this round-trips through JSON in Redis; a Date would
     // come back as a string anyway and the type would be lying.
     created_at: new Date(character.created_at).toISOString(),
+    // Rendered to a phrase here rather than in the prompt builder so the words
+    // the companion is told match the words on the button the user tapped.
+    ...(character.adaptation?.recent_change
+      ? {
+          recent_change: {
+            phrase: phraseFor(
+              character.adaptation.recent_change.trait,
+              character.adaptation.recent_change.direction,
+            ),
+            at: new Date(character.adaptation.recent_change.at).toISOString(),
+          },
+        }
+      : {}),
     ...(character.studio_config
       ? {
           studio: {
@@ -271,6 +287,14 @@ export async function* streamConversation(
       mode: charConfig.mode,
       knownSince: new Date(charConfig.created_at),
       ...(charConfig.studio ? { studio: charConfig.studio } : {}),
+      ...(charConfig.recent_change
+        ? {
+            recentChange: {
+              phrase: charConfig.recent_change.phrase,
+              at: new Date(charConfig.recent_change.at),
+            },
+          }
+        : {}),
     },
     sessionCtx,
     message,

@@ -29,6 +29,35 @@ export interface IPersonalitySliders {
   formality: number;
 }
 
+/**
+ * Phase C state: what has been offered, what has been answered, and what was
+ * changed recently enough that the companion should be aware of it.
+ *
+ * It lives on the character rather than the user because the tuning is
+ * per-relationship — being blunter with one companion says nothing about how
+ * someone wants to be spoken to by another.
+ */
+export interface IAdaptation {
+  /** The outstanding offer, if any. Cleared when answered. */
+  suggestion?: {
+    memory_id: string;
+    trait: keyof IPersonalitySliders;
+    direction: "up" | "down";
+    offered_at: Date;
+  } | null;
+  /** Starts the one-a-week cooldown. Separate from `suggestion` so an ignored
+   *  offer does not silently suppress every future one. */
+  last_offered_at?: Date | null;
+  /** Applied or dismissed — either way, never offered again. */
+  handled_memory_ids?: string[];
+  /** Fed into the identity block so the change is acknowledged, not silent. */
+  recent_change?: {
+    trait: keyof IPersonalitySliders;
+    direction: "up" | "down";
+    at: Date;
+  } | null;
+}
+
 export interface IVoiceConfig {
   speed: number;
   background_sound: string;
@@ -55,6 +84,7 @@ export interface ICharacter {
   avatar_source: "preset";
   persona_config: IPersonaConfig;
   personality_sliders: IPersonalitySliders;
+  adaptation?: IAdaptation;
   memory_enabled: boolean;
   is_active: boolean;
   created_at: Date;

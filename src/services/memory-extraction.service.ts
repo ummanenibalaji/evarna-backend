@@ -10,12 +10,30 @@ import { Character } from "../models/character.model.js";
 import { getScenario, CUSTOM_MEMORY_GUIDANCE } from "../data/scenarios.js";
 import { logger } from "../utils/logger.js";
 import type { MemoryExtractionPayload } from "../queues/memory.queue.js";
+import type { ISliderHint } from "../types/memory.types.js";
 
 interface ExtractedMemory {
   content: string;
   type: "fact" | "emotion" | "event" | "preference";
   sentiment: string;
   related_entities: string[];
+  slider_hint?: { trait: string; direction: string } | null;
+}
+
+const HINT_TRAITS = new Set(["warmth", "humor", "directness", "energy", "formality"]);
+
+/**
+ * The model is asked for a slider hint but is not trusted to produce one. A
+ * malformed hint would go straight into a suggestion offering to retune the
+ * companion, so anything not exactly on-contract is dropped rather than coerced.
+ */
+function normalizeHint(m: ExtractedMemory): ISliderHint | undefined {
+  if (m.type !== "preference") return undefined;
+  const h = m.slider_hint;
+  if (!h || typeof h !== "object") return undefined;
+  if (!HINT_TRAITS.has(h.trait)) return undefined;
+  if (h.direction !== "up" && h.direction !== "down") return undefined;
+  return { trait: h.trait as ISliderHint["trait"], direction: h.direction };
 }
 
 interface ExtractionResult {
@@ -35,7 +53,8 @@ const JSON_CONTRACT = `Return valid JSON with this exact structure:
       "content": "concise memory written in third person",
       "type": "fact|emotion|event|preference",
       "sentiment": "positive|negative|neutral",
-      "related_entities": ["entity1", "entity2"]
+      "related_entities": ["entity1", "entity2"],
+      "slider_hint": null
     }
   ],
   "mood_summary": "1-2 sentence summary of the user emotional state during this session",
@@ -50,7 +69,25 @@ const JSON_CONTRACT = `Return valid JSON with this exact structure:
   ]
 }`;
 
-const SHARED_RULES = `Rules:
+// The hint is what makes a preference actionable instead of just readable. It
+// is requested here rather than in a second pass because this call is already
+// classifying the memory — the marginal cost is a few tokens.
+const SHARED_RULES = `slider_hint:
+- Only ever set on a "preference" memory. Always null for every other type.
+- Set it ONLY when the user asked for a change in how they are spoken to, and it
+  maps cleanly onto exactly one of these five traits:
+    warmth      up = more caring and affectionate,  down = more reserved
+    humor       up = more jokes and levity,         down = more serious
+    directness  up = blunter, less hedging,         down = gentler, softer
+    energy      up = more enthusiastic,             down = calmer, slower
+    formality   up = more polished,                 down = more casual
+- Format: {"trait": "directness", "direction": "up"}
+- Leave it null when in any doubt, when the preference is about topics or
+  content rather than tone, or when it spans more than one trait. A wrong hint
+  results in the user being offered a personality change they never asked for,
+  which is worse than offering nothing.
+
+Rules:
 - Only extract information explicitly stated. No inferences.
 - Maximum 10 memories per session. Prioritize novel details not previously known.
 - Write in third person using "user" ("user likes...", "user's sister...").
@@ -218,6 +255,7 @@ export async function runMemoryExtraction(payload: MemoryExtractionPayload): Pro
 
   // 5. Insert memories into MongoDB
   const now = new Date();
+  const hints = memories.map(normalizeHint);
   const memoryDocs = memories.map((m, i) => ({
     user_id: userId,
     character_id: characterObjId,
@@ -227,6 +265,7 @@ export async function runMemoryExtraction(payload: MemoryExtractionPayload): Pro
     embedding: embeddings[i] ?? [],
     source_session_id: sessionObjId,
     related_entities: Array.isArray(m.related_entities) ? m.related_entities : [],
+    ...(hints[i] ? { slider_hint: hints[i] } : {}),
     access_count: 0,
     last_accessed_at: now,
     is_deleted: false,

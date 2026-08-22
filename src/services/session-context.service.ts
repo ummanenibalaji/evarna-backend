@@ -16,7 +16,7 @@ function sessionKey(sessionId: string): string {
 // and quietly serves undefined for a TTL — bump this whenever the shape of
 // CachedCharacterConfig changes.
 function characterKey(characterId: string): string {
-  return `character_config:v3:${characterId}`;
+  return `character_config:v4:${characterId}`;
 }
 
 export async function getSessionContext(

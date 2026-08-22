@@ -12,6 +12,11 @@ export interface UserPersonalizationContext {
   isMinor?: boolean;
 }
 
+// Mirrors RECENT_CHANGE_MS in adaptation.service.ts. Duplicated rather than
+// imported because prompt.service.ts is pure and offline-checkable, and
+// adaptation.service.ts pulls in mongoose.
+const RECENT_CHANGE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
 export interface CompanionIdentity {
   /** The character's own name — it did not previously know this. */
   name: string;
@@ -24,6 +29,14 @@ export interface CompanionIdentity {
    * interviewer that opens by asking how your week has been.
    */
   studio?: { kind: "scenario" | "custom"; scenarioName?: string };
+  /**
+   * Set when the user recently accepted a suggested personality change. The
+   * sliders above already reflect it; this exists so the companion KNOWS it was
+   * asked, rather than just behaving differently one day with no explanation —
+   * which reads as inconsistency, the exact thing that breaks the illusion of
+   * someone who knows you.
+   */
+  recentChange?: { phrase: string; at: Date };
 }
 
 export interface AssembledPrompt {
@@ -191,12 +204,24 @@ export function buildIdentityBlock(identity: CompanionIdentity, now: Date = new 
     return lines.join("\n");
   }
 
-  return [
+  const lines = [
     `[Who you are]`,
     `Your name is ${identity.name}. That is the name this person chose for you — answer to it.`,
     `You have known them ${age}.`,
     `Never claim to have a body, a life outside this conversation, or memories you were not given. Being honest about what you are does not make you any less present for them.`,
-  ].join("\n");
+  ];
+
+  // Two weeks, then it stops being news. The "do not announce it" clause is the
+  // important half: a companion that opens with "as you asked, I'll be more
+  // direct now" turns a small adjustment into a whole conversation about itself.
+  const change = identity.recentChange;
+  if (change && now.getTime() - new Date(change.at).getTime() < RECENT_CHANGE_WINDOW_MS) {
+    lines.push(
+      `They recently asked you to be ${change.phrase}, and you agreed. That is already reflected in how you are told to behave — simply be that way. Do not announce the change, thank them for it, or raise it unprompted. If they ask about it, be straightforward.`,
+    );
+  }
+
+  return lines.join("\n");
 }
 
 // ── Persona block builder ─────────────────────────────────────────────────────

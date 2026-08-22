@@ -15,6 +15,7 @@
     "check:routes": "tsx src/checks/routes.check.ts",
     "check:studio": "tsx src/checks/studio.check.ts",
     "check:outreach": "tsx src/checks/outreach.check.ts",
+    "check:adaptation": "tsx src/checks/adaptation.check.ts",
     "smoke": "tsx src/checks/smoke.ts",
     "setup:db": "tsx src/scripts/setup-db.ts",
     "purge:studio-memories": "tsx src/scripts/purge-studio-memories.ts"
