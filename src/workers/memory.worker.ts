@@ -8,6 +8,7 @@ import {
 } from "../queues/memory.queue.js";
 import { runMemoryExtraction } from "../services/memory-extraction.service.js";
 import { generateUsageSummary } from "../services/memory-summary.service.js";
+import { runOutreachSweep } from "../services/outreach.service.js";
 import { logger } from "../utils/logger.js";
 
 export function startMemoryWorker(): Worker {
@@ -26,6 +27,11 @@ export function startMemoryWorker(): Worker {
           const payload = job.data as UsageSummaryPayload;
           logger.info({ characterId: payload.characterId }, "Running usage summary");
           await generateUsageSummary(payload.characterId, payload.userId);
+          break;
+        }
+
+        case JOB_NAMES.OUTREACH_SWEEP: {
+          await runOutreachSweep();
           break;
         }
 

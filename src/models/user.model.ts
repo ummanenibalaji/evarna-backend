@@ -38,6 +38,17 @@ const userSchema = new Schema<IUser>(
       enum: ["warm", "direct", "funny", "calm"],
     },
     onboarding_completed: { type: Boolean, default: false },
+
+    // ── push delivery ─────────────────────────────────────────────────────
+    // Expo push token, `ExponentPushToken[xxxxxxxx]`. Null means no device is
+    // registered (never installed, or notifications revoked) — and Expo may
+    // tell us a token is dead (DeviceNotRegistered), which nulls it again.
+    push_token: { type: String, default: null },
+    // IANA name, e.g. "Asia/Kolkata". The scheduler needs it for quiet hours
+    // (nothing sent 22:00-08:00 local). Refreshed from the device on every
+    // launch rather than asked once at signup: people travel, and a stale
+    // timezone means a notification at 3am.
+    timezone: { type: String, default: null },
     created_at: { type: Date, default: () => new Date() },
     last_active_at: { type: Date, default: () => new Date() },
   },

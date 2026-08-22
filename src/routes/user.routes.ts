@@ -50,6 +50,34 @@ const UpdateMeSchema = z.object({
   gender: z.enum(["male", "female", "nonbinary", "undisclosed"]).optional(),
 });
 
+// Both prefixes are in the wild: Expo issues `ExponentPushToken[...]` and
+// `ExpoPushToken[...]` depending on SDK vintage. A malformed token is accepted
+// by Expo's API and then silently dropped forever, so this regex is the only
+// place a typo'd token is ever visible.
+const EXPO_PUSH_TOKEN = /^Expo(nent)?PushToken\[[^\]]+\]$/;
+
+const PushTokenSchema = z.object({
+  // null is not "missing" — it is the client saying notifications were revoked.
+  push_token: z
+    .string()
+    .regex(EXPO_PUSH_TOKEN, "push_token must look like ExponentPushToken[...]")
+    .nullable(),
+  timezone: z
+    .string()
+    .refine(
+      (v) => {
+        try {
+          new Intl.DateTimeFormat(undefined, { timeZone: v });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: 'timezone must be an IANA name, e.g. "Asia/Kolkata"' },
+    )
+    .optional(),
+});
+
 // Deleting an account is irreversible and cascades across six collections, so
 // it takes an explicit confirmation string rather than being a bare DELETE that
 // a mis-wired button could fire.
@@ -231,6 +259,32 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       { new: true },
     )
       .select("display_name gender communication_style email onboarding_completed")
+      .lean();
+
+    if (!updated) return reply.status(404).send({ success: false, error: "User not found" });
+    return reply.send({ success: true, data: updated });
+  });
+
+  // PUT /api/v1/users/me/push-token
+  //
+  // The device calls this on every launch, so it doubles as the timezone
+  // refresh. `push_token: null` clears the token.
+  app.put("/me/push-token", async (request, reply) => {
+    const userId = getUserId(request);
+    const parsed = PushTokenSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? "Invalid input",
+      });
+    }
+
+    const updated = await User.findByIdAndUpdate(
+      userId,
+      { $set: parsed.data },
+      { new: true },
+    )
+      .select("push_token timezone")
       .lean();
 
     if (!updated) return reply.status(404).send({ success: false, error: "User not found" });

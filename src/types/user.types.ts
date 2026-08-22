@@ -16,6 +16,11 @@ export interface IUser {
   is_minor: boolean;
   communication_style?: CommunicationStyle;
   onboarding_completed: boolean;
+  // Null until a device registers, and back to null when Expo reports the
+  // device unregistered.
+  push_token: string | null;
+  // IANA name, refreshed from the device on each launch (people travel).
+  timezone: string | null;
   created_at: Date;
   last_active_at: Date;
 }

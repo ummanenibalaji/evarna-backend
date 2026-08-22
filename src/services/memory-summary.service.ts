@@ -3,6 +3,7 @@ import { getOpenAI, MODELS } from "../config/openai.js";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { Session } from "../models/session.model.js";
 import { MemorySummary } from "../models/memory-summary.model.js";
+import { saveFollowUps } from "../models/follow-up.model.js";
 import { logger } from "../utils/logger.js";
 import type { IMemorySummary } from "../types/memory.types.js";
 
@@ -154,6 +155,20 @@ export async function generateUsageSummary(
   } catch (err) {
     logger.error({ err, characterId }, "Failed to write usage summary");
   }
+
+  // The embedded follow_up_hints above stay as the summariser's own record of
+  // this window. Queue the same hints as FollowUp work items so the scheduler
+  // can find them by (status, trigger_date) without $unwind.
+  //
+  // ponytail: attributed to the last session in the window — the summary spans
+  // several and the hint has no per-session provenance. Good enough for "where
+  // did this come from"; if the scheduler ever needs the exact source session,
+  // that has to come from the LLM.
+  await saveFollowUps(result.follow_up_hints, {
+    user_id: userId,
+    character_id: characterObjId,
+    session_id: turns[turns.length - 1]!.session_id,
+  });
 }
 
 export async function getLatestUsageSummary(

@@ -5,6 +5,8 @@ export type TurnRole = "user" | "assistant";
 export interface ISafetyFlags {
   categories: Record<string, unknown>;
   flagged: boolean;
+  /** Optional because turns written before proactive outreach existed lack it. */
+  is_crisis?: boolean;
 }
 
 export interface ITokensUsed {

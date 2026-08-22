@@ -167,6 +167,7 @@ async function persistTurns(
       safety_flags: {
         categories: userModeration.categories,
         flagged: userModeration.flagged,
+        is_crisis: userModeration.is_crisis,
       },
       tokens_used: { input: tokensUsed.input, output: 0 },
       model_used: MODELS.CONVERSATION,

@@ -6,6 +6,7 @@ import { connectRedis } from "./config/redis.js";
 import { logger } from "./utils/logger.js";
 import { startMemoryWorker } from "./workers/memory.worker.js";
 import { startStaleSessionCleanup } from "./services/stale-session.service.js";
+import { scheduleOutreachSweep } from "./queues/memory.queue.js";
 
 async function start(): Promise<void> {
   await connectDatabase();
@@ -15,6 +16,7 @@ async function start(): Promise<void> {
   await checkVectorSearchIndex();
   startMemoryWorker();
   startStaleSessionCleanup();
+  await scheduleOutreachSweep();
 
   const app = await buildApp();
   await app.listen({ port: env.PORT, host: "0.0.0.0" });

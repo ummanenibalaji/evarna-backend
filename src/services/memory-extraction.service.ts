@@ -2,6 +2,7 @@ import { Types } from "mongoose";
 import { getOpenAI, MODELS } from "../config/openai.js";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { Memory } from "../models/memory.model.js";
+import { saveFollowUps } from "../models/follow-up.model.js";
 import { Session } from "../models/session.model.js";
 import { MemorySummary } from "../models/memory-summary.model.js";
 import { enqueueUsageSummary } from "../queues/memory.queue.js";
@@ -188,6 +189,13 @@ export async function runMemoryExtraction(payload: MemoryExtractionPayload): Pro
 
   if (memories.length === 0) {
     logger.info({ sessionId }, "No memories extracted from session");
+    // A session can produce nothing worth storing as a memory and still be
+    // worth following up on ("interview is Thursday") — queue the hints anyway.
+    await saveFollowUps(extraction.follow_up_hints, {
+      user_id: userId,
+      character_id: characterObjId,
+      session_id: sessionObjId,
+    });
     await checkUsageSummaryThreshold(characterId, userId, characterObjId, characterMode);
     return;
   }
@@ -232,6 +240,15 @@ export async function runMemoryExtraction(payload: MemoryExtractionPayload): Pro
     logger.error({ err, sessionId }, "Memory insert failed");
     return;
   }
+
+  // 6. Queue any follow-up hints as their own work items. Extraction runs after
+  // every session, so this is the bulk of the supply — until now it was parsed
+  // and thrown away.
+  await saveFollowUps(extraction.follow_up_hints, {
+    user_id: userId,
+    character_id: characterObjId,
+    session_id: sessionObjId,
+  });
 
   // 7. Check usage-summary threshold and enqueue Job 2 if met
   await checkUsageSummaryThreshold(characterId, userId, characterObjId, characterMode);

@@ -13,6 +13,11 @@ const conversationTurnSchema = new Schema<IConversationTurn>(
     safety_flags: {
       categories: { type: Schema.Types.Mixed, default: {} },
       flagged: { type: Boolean, default: false },
+      // Computed on every turn and, until now, thrown away. Proactive outreach
+      // needs it: a companion cheerfully asking how an interview went two days
+      // after a self-harm disclosure is the worst message the product could
+      // send, and this is the only durable record that it happened.
+      is_crisis: { type: Boolean, default: false },
     },
     tokens_used: {
       input: { type: Number, default: 0 },
@@ -28,6 +33,12 @@ const conversationTurnSchema = new Schema<IConversationTurn>(
 // Indexes from PRD
 conversationTurnSchema.index({ session_id: 1, created_at: 1 });
 conversationTurnSchema.index({ user_id: 1, created_at: 1 });
+// Sparse: crisis turns are a tiny fraction of all turns, and outreach asks
+// "has this user had one recently" before every send.
+conversationTurnSchema.index(
+  { user_id: 1, "safety_flags.is_crisis": 1, created_at: -1 },
+  { sparse: true },
+);
 
 export const ConversationTurn = model<IConversationTurn>(
   "ConversationTurn",
