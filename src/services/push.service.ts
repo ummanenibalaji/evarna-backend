@@ -28,6 +28,14 @@ export interface PushInput {
   title: string;
   body: string;
   data?: Record<string, unknown>;
+  /**
+   * Notification category, which is what enables the inline reply action. The
+   * client registers "message" with a text-input action; without this field the
+   * notification arrives with no way to reply from the shade.
+   */
+  categoryId?: string;
+  /** Groups a companion's messages into one thread instead of stacking. */
+  threadId?: string;
 }
 
 interface ExpoPushResponse {
@@ -66,6 +74,8 @@ export async function sendPush(input: PushInput): Promise<PushResult> {
       title: input.title,
       body: input.body,
       ...(input.data ? { data: input.data } : {}),
+      ...(input.categoryId ? { categoryId: input.categoryId } : {}),
+      ...(input.threadId ? { threadId: input.threadId } : {}),
     }),
   }).catch((err: unknown) => {
     logger.error({ err, to }, "push: request to Expo failed");

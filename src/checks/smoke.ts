@@ -714,9 +714,91 @@ async function run(): Promise<void> {
   step("16. proactive outreach send policy (a regression here messages someone in crisis)");
   await runOutreachChecks(a.user_id, characterId);
 
+  // ── 17 ────────────────────────────────────────────────────────────────────
+  step("17. a reply that lands while you are away still reaches you");
+  await runUnreadReplyChecks(a.token, a.user_id, characterId);
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);
+}
+
+/**
+ * Backgrounding the app mid-reply must not lose the answer.
+ *
+ * The SSE route keeps generating after the client disconnects, so the reply is
+ * produced and persisted either way — what used to be missing is that nothing
+ * told the user. This aborts a real stream and asserts both halves: the turn
+ * lands, and the notification path actually runs.
+ */
+async function runUnreadReplyChecks(
+  token: string,
+  userId: string,
+  characterId: string,
+): Promise<void> {
+  const started = await api<{ session_id: string }>("POST", "/sessions/start", token, {
+    character_id: characterId,
+    session_type: "text",
+  });
+  assert.equal(started.status, 201, "could not start a session for the unread-reply check");
+  const sessionId = started.json.data!.session_id;
+
+  // A syntactically valid token Expo will reject. Its disappearance is how we
+  // prove the notification path ran all the way to the wire — there is no other
+  // observable effect from a machine with no device attached.
+  await User.updateOne(
+    { _id: userId },
+    { $set: { push_token: "ExponentPushToken[smoke-unread-reply]" } },
+  );
+
+  // Abort the moment the first bytes arrive: that is a backgrounded app, not a
+  // request that never happened.
+  const ctrl = new AbortController();
+  const res = await fetch(`${API}/conversations/send`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ session_id: sessionId, message: "What should I focus on this week?" }),
+    signal: ctrl.signal,
+  });
+  assert.equal(res.status, 200, "the stream did not start");
+
+  const reader = res.body!.getReader();
+  await reader.read();          // first chunk — the reply is under way
+  ctrl.abort();                 // and now the user backgrounds the app
+  await reader.cancel().catch(() => {});
+  ok("a stream can be abandoned mid-reply");
+
+  // Generation continues server-side; give it room to finish and notify.
+  let persisted = "";
+  for (let i = 0; i < 20; i++) {
+    await sleep(1500);
+    const turns = await api<{ turns: Array<{ role: string; content_text: string }> }>(
+      "GET",
+      `/conversations/${sessionId}`,
+      token,
+    );
+    const assistant = turns.json.data?.turns.find((t) => t.role === "assistant");
+    if (assistant?.content_text) { persisted = assistant.content_text; break; }
+  }
+  assert.ok(
+    persisted.length > 0,
+    "the reply was abandoned instead of finished — a user who backgrounds the app loses the answer they asked for",
+  );
+  ok("the reply is generated and persisted anyway");
+
+  const after = await User.findById(userId).select("push_token").lean();
+  assert.equal(
+    after?.push_token ?? null,
+    null,
+    "the unread-reply notification never reached Expo — the answer would sit unread with nothing to announce it",
+  );
+  ok("the user is notified that the answer arrived");
+
+  await User.updateOne({ _id: userId }, { $set: { push_token: null } });
 }
 
 /**

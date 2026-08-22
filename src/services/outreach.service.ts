@@ -46,6 +46,9 @@ const CRISIS_CHECKIN_DELAY_HOURS = 24;
 /** Cap per sweep so a backlog cannot fan out into a notification storm. */
 const MAX_SENDS_PER_SWEEP = 50;
 
+/** Matches the category the app registers for the inline reply action. */
+const MESSAGE_CATEGORY = "message";
+
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
@@ -181,6 +184,8 @@ async function deliver(
     title: characterName,
     body: message,
     data: { character_id: characterId.toString(), session_id: sessionId.toString() },
+    categoryId: MESSAGE_CATEGORY,
+    threadId: characterId.toString(),
   });
 
   if (result === "invalid_token") {
@@ -192,6 +197,55 @@ async function deliver(
     return false;
   }
   return result === "ok";
+}
+
+// ── Unread replies ───────────────────────────────────────────────────────────
+
+/**
+ * Tell someone their companion answered while they were away.
+ *
+ * The SSE route keeps generating after a client disconnects — the reply is
+ * produced and persisted regardless. So backgrounding the app mid-answer left a
+ * real, finished message sitting unread with nothing to announce it, and the
+ * user found it whenever they next happened to open the app.
+ *
+ * This deliberately does NOT go through the send policy above. Quiet hours, the
+ * daily cap and the recent-activity skip all exist to restrain UNSOLICITED
+ * contact. This is the answer to a question the user asked seconds ago, which
+ * is the one case where notifying at 3am is correct: they were awake, and they
+ * asked. Suppressing it would be the surprising behaviour, not the polite one.
+ */
+export async function notifyUnreadReply(
+  userId: string,
+  characterId: string,
+  sessionId: string,
+  message: string,
+): Promise<void> {
+  try {
+    const [user, character] = await Promise.all([
+      User.findById(userId).select("push_token").lean(),
+      Character.findById(characterId).select("name is_active").lean(),
+    ]);
+    if (!user?.push_token || !character?.is_active) return;
+
+    const result = await sendPush({
+      to: user.push_token,
+      title: character.name,
+      body: message.length > 200 ? `${message.slice(0, 197)}…` : message,
+      data: { character_id: characterId, session_id: sessionId },
+      categoryId: MESSAGE_CATEGORY,
+      threadId: characterId,
+    });
+
+    if (result === "invalid_token") {
+      await clearPushToken(userId).catch(() => {});
+    }
+  } catch (err) {
+    // Never let this affect the conversation it belongs to. The message is
+    // already persisted; a missing notification is a smaller failure than a
+    // request that errors after the user already got their answer.
+    logger.error({ err, userId }, "outreach: unread-reply notification failed");
+  }
 }
 
 // ── Crisis handling ──────────────────────────────────────────────────────────

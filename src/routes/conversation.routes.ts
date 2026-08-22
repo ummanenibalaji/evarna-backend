@@ -4,6 +4,7 @@ import { Types } from "mongoose";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { streamConversation } from "../services/conversation.service.js";
 import { findOwnedSession } from "../services/account.service.js";
+import { notifyUnreadReply } from "../services/outreach.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
 
@@ -56,6 +57,17 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       "X-Accel-Buffering": "no",   // disable nginx buffering
     });
 
+    // Generation deliberately continues after the client goes away — the turn
+    // is persisted either way, so abandoning it would throw away work the user
+    // already paid for and asked for. What was missing is that nobody told
+    // them: the answer just sat there until they next opened the app.
+    let clientGone = false;
+    res.on("close", () => { clientGone = true; });
+
+    // Accumulated so the notification can carry the actual reply rather than a
+    // generic "you have a message".
+    let assistantText = "";
+
     try {
       const gen = streamConversation({
         sessionId: session_id,
@@ -67,30 +79,41 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       for await (const event of gen) {
         switch (event.type) {
           case "chunk":
-            res.write(sseEvent("chunk", { content: event.content }));
+            assistantText += event.content;
+            if (!clientGone) res.write(sseEvent("chunk", { content: event.content }));
             break;
           case "crisis":
-            res.write(sseEvent("crisis", { content: event.content }));
+            assistantText += event.content;
+            if (!clientGone) res.write(sseEvent("crisis", { content: event.content }));
             break;
           case "done":
-            res.write(
-              sseEvent("done", {
-                turn_id: event.turn_id,
-                tokens_used: event.tokens_used,
-              })
-            );
+            if (!clientGone) {
+              res.write(
+                sseEvent("done", {
+                  turn_id: event.turn_id,
+                  tokens_used: event.tokens_used,
+                })
+              );
+            }
             break;
           case "error":
-            res.write(sseEvent("error", { message: event.message }));
+            if (!clientGone) res.write(sseEvent("error", { message: event.message }));
             break;
         }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err, session_id }, `Conversation stream error: ${message}`);
-      res.write(sseEvent("error", { message }));
+      if (!clientGone) res.write(sseEvent("error", { message }));
     } finally {
       res.end();
+
+      // The reply landed while they were away. Not awaited: the response is
+      // already finished and the caller is gone, so there is nothing left to
+      // hold open for.
+      if (clientGone && assistantText.trim()) {
+        void notifyUnreadReply(user_id, character_id, session_id, assistantText.trim());
+      }
     }
   });
 
