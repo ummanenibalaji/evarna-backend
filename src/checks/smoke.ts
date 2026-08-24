@@ -173,20 +173,28 @@ interface AuthSession {
  * or writes under a different key, every section below fails.
  */
 async function signIn(email: string): Promise<AuthSession> {
-  const requested = await api("POST", "/auth/email/request", null, { email });
+  const requested = await api<{ sent: boolean; dev_code?: string }>(
+    "POST", "/auth/email/request", null, { email },
+  );
   assert.equal(
     requested.status,
     200,
     `auth/email/request failed: ${JSON.stringify(requested.json)}`,
   );
 
-  const raw = await getRedis().get(`otp:${email.toLowerCase()}`);
-  assert.ok(
-    raw,
-    `no one-time code at redis key otp:${email.toLowerCase()} — ` +
-    "is the server on the same REDIS_URL as this check?",
-  );
-  const { code } = JSON.parse(raw) as { code: string; attempts: number };
+  // Prefer the code the API itself hands back in development. Reaching into
+  // Redis still works and stays as the fallback for a server configured with a
+  // real mail provider, where no code comes back in the response.
+  let code = requested.json.data?.dev_code;
+  if (!code) {
+    const raw = await getRedis().get(`otp:${email.toLowerCase()}`);
+    assert.ok(
+      raw,
+      `no one-time code returned by the API and none at redis key otp:${email.toLowerCase()} — ` +
+      "is the server on the same REDIS_URL as this check?",
+    );
+    code = (JSON.parse(raw) as { code: string; attempts: number }).code;
+  }
 
   const verified = await api<AuthSession>("POST", "/auth/email/verify", null, { email, code });
   assert.equal(verified.status, 200, `auth/email/verify failed: ${JSON.stringify(verified.json)}`);
@@ -722,6 +730,27 @@ async function run(): Promise<void> {
   // ── 18 ────────────────────────────────────────────────────────────────────
   step("18. the companion adapts only when asked, and only once a week");
   await runAdaptationChecks(a.token, a.user_id, characterId, reborn.token);
+
+  // ── 18b ───────────────────────────────────────────────────────────────────
+  step("18b. requesting sign-in codes is rate limited");
+
+  // Unauthenticated, writes to Redis, and (once a provider is configured)
+  // sends real mail from your domain. Unthrottled it is both an email-bombing
+  // vector and an unlimited brute-force window: every request mints a fresh
+  // code AND resets the five-attempt counter.
+  const rlEmail = `${SMOKE_PREFIX}-ratelimit-${Date.now()}@example.test`;
+  let sawLimit = false;
+  for (let i = 0; i < 8; i++) {
+    const r = await api<unknown>("POST", "/auth/email/request", null, { email: rlEmail });
+    if (r.status === 429) {
+      assert.equal(r.json.code, "RATE_LIMITED", "a throttled request must say why");
+      sawLimit = true;
+      break;
+    }
+    assert.equal(r.status, 200, `unexpected status ${r.status} while probing the rate limit`);
+  }
+  assert.ok(sawLimit, "sign-in codes can be requested without limit");
+  ok("repeated code requests for one address are refused");
 
   // ── 19 ────────────────────────────────────────────────────────────────────
   step("19. the streak and the week strip are the user's own, not constants");

@@ -19,7 +19,9 @@ import { SignJWT } from "jose";
 // Dynamic, not static: ESM evaluates every static import before the module body
 // runs, so a top-level `import` of anything that reads config/env.js would blow
 // up on the missing vars this file just set above.
-const { issueSessionToken, verifySessionToken } = await import("../services/auth.service.js");
+const { issueSessionToken, verifySessionToken, assertEmailDeliverable } = await import(
+  "../services/auth.service.js"
+);
 const { ageInYears, isMinorNow, isUnderMinimumAge, MIN_AGE_YEARS } = await import("../utils/age.js");
 
 let failures = 0;
@@ -176,6 +178,24 @@ async function main(): Promise<void> {
     console.error(`    expected: ${JSON.stringify(expected)}`);
     console.error(`    actual:   ${JSON.stringify(actual)}`);
   }
+
+  console.log("\nEmail code delivery");
+
+  // Sign-in used to report `sent: true` with no mail provider configured, so a
+  // production deploy that forgot the key looked healthy while nobody could
+  // get in. These two assertions are the whole guard.
+  const boots = (nodeEnv: string, key: string): boolean => {
+    try {
+      assertEmailDeliverable(nodeEnv, key);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  check("production refuses to boot with no mail provider", !boots("production", ""));
+  check("production boots once a provider is configured", boots("production", "re_test_key"));
+  check("development still runs without one", boots("development", ""));
 
   console.log(
     failures === 0

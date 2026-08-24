@@ -9,6 +9,7 @@ import {
   issueSessionToken,
   revokeAllSessions,
   AuthError,
+  RateLimitedError,
 } from "../services/auth.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { isMinorNow } from "../utils/age.js";
@@ -65,18 +66,36 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ success: false, error: "A valid email is required" });
     }
 
+    let result: Awaited<ReturnType<typeof requestEmailCode>>;
     try {
-      await requestEmailCode(parsed.data.email);
+      result = await requestEmailCode(parsed.data.email, request.ip);
     } catch (err) {
+      if (err instanceof RateLimitedError) {
+        return reply.status(429).send({
+          success: false,
+          error: err.message,
+          code: "RATE_LIMITED",
+        });
+      }
       if (err instanceof AuthError) {
         return reply.status(502).send({ success: false, error: err.message });
       }
       throw err;
     }
 
-    // Always the same response whether or not that address has an account.
-    // Anything else turns this endpoint into an account-existence oracle.
-    return reply.send({ success: true, data: { sent: true } });
+    // The response never reveals whether that address has an account —
+    // anything else turns this endpoint into an account-existence oracle. It
+    // DOES report whether a mail actually went out, which is not the same
+    // thing: it used to answer `sent: true` with no provider configured, so
+    // the app told people to check an inbox nothing was ever sent to.
+    return reply.send({
+      success: true,
+      data: {
+        sent: result.delivered,
+        // Development only; the service refuses to produce this in production.
+        ...(result.devCode ? { dev_code: result.devCode } : {}),
+      },
+    });
   });
 
   // POST /api/v1/auth/email/verify — exchange the code for a session

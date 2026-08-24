@@ -142,13 +142,23 @@ interface OtpRecord {
   attempts: number;
 }
 
-async function sendCode(email: string, code: string): Promise<void> {
+/**
+ * Returns true when the code actually reached a mail provider.
+ *
+ * It used to return void and the route always answered `sent: true`, so with no
+ * provider configured the app told people to check an inbox nothing had been
+ * sent to. Sign-in appeared to work and then simply never completed.
+ */
+async function sendCode(email: string, code: string): Promise<boolean> {
   if (!env.RESEND_API_KEY) {
+    // assertEmailDeliverable() has already refused to boot in production, so
+    // reaching here means development, where the code comes back in the
+    // response instead — see requestEmailCode.
     logger.warn(
       { email, code },
-      "auth: no RESEND_API_KEY set — email code logged instead of sent (development only)",
+      "auth: no RESEND_API_KEY set — code returned in the response (development only)",
     );
-    return;
+    return false;
   }
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -164,19 +174,100 @@ async function sendCode(email: string, code: string): Promise<void> {
     }),
   });
   if (!res.ok) {
-    logger.error({ status: res.status, email }, "auth: email send failed");
+    // The body carries the actual reason — almost always an unverified `from`
+    // domain — and without it this is an unexplained 502 at the one moment a
+    // user cannot get past.
+    const detail = await res.text().catch(() => "");
+    logger.error({ status: res.status, email, detail }, "auth: email send failed");
     throw new AuthError("Could not send the code. Please try again.");
+  }
+  return true;
+}
+
+/**
+ * Called once at boot. A production server with no mail provider cannot sign
+ * anybody in, and the only way that used to surface was as users silently
+ * failing to receive codes. Fail at startup instead, where someone is looking.
+ */
+// Arguments default to the live config but are injectable, because env.* is
+// snapshotted at import and cannot be varied from a test otherwise.
+export function assertEmailDeliverable(
+  nodeEnv: string = env.NODE_ENV,
+  apiKey: string = env.RESEND_API_KEY,
+): void {
+  if (nodeEnv === "production" && !apiKey) {
+    throw new Error(
+      "RESEND_API_KEY is required in production: without it no sign-in code can be delivered.",
+    );
   }
 }
 
-export async function requestEmailCode(email: string): Promise<void> {
+/**
+ * Requesting a code is unauthenticated and writes to Redis and a paid mail
+ * provider, so it needs a ceiling on both axes.
+ *
+ * Per address, because each request mints a FRESH code and resets the attempt
+ * counter — without a cap, "request, guess five times, repeat" walks the whole
+ * six-digit space with no lockout ever engaging.
+ * Per IP, because otherwise one script can mail-bomb arbitrary strangers from
+ * your domain and burn your sending reputation doing it.
+ */
+const OTP_MAX_PER_EMAIL_PER_HOUR = 5;
+const OTP_MAX_PER_IP_PER_HOUR = 20;
+const RATE_WINDOW_SECONDS = 3600;
+
+export class RateLimitedError extends Error {
+  constructor() {
+    super("Too many codes requested. Please wait a while and try again.");
+    this.name = "RateLimitedError";
+  }
+}
+
+async function bump(key: string, limit: number): Promise<boolean> {
+  const redis = getRedis();
+  const count = await redis.incr(key);
+  // Only the first increment sets the expiry, so the window is fixed from the
+  // first request rather than sliding forward on every hit — which would let a
+  // steady trickle keep the key alive forever.
+  if (count === 1) await redis.expire(key, RATE_WINDOW_SECONDS);
+  return count <= limit;
+}
+
+export interface EmailCodeResult {
+  /** True only if a mail provider accepted it. */
+  delivered: boolean;
+  /** Development only, when nothing could be delivered. Never set in production. */
+  devCode?: string;
+}
+
+export async function requestEmailCode(
+  email: string,
+  requesterIp?: string,
+): Promise<EmailCodeResult> {
   const normalized = email.trim().toLowerCase();
+
+  const withinEmailLimit = await bump(`otp:rl:email:${normalized}`, OTP_MAX_PER_EMAIL_PER_HOUR);
+  const withinIpLimit = requesterIp
+    ? await bump(`otp:rl:ip:${requesterIp}`, OTP_MAX_PER_IP_PER_HOUR)
+    : true;
+  if (!withinEmailLimit || !withinIpLimit) {
+    logger.warn({ email: normalized, requesterIp }, "auth: code request rate limited");
+    throw new RateLimitedError();
+  }
+
   // randomInt is the cryptographic generator; Math.random would make codes
   // predictable from one another, which is the whole attack here.
   const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
   const record: OtpRecord = { code, attempts: 0 };
   await getRedis().set(otpKey(normalized), JSON.stringify(record), "EX", OTP_TTL_SECONDS);
-  await sendCode(normalized, code);
+  const delivered = await sendCode(normalized, code);
+  // Guarded twice on purpose. assertEmailDeliverable() makes this branch
+  // unreachable in production; this makes handing the caller a valid code
+  // impossible there even if that guard is ever removed.
+  if (!delivered && env.NODE_ENV !== "production") {
+    return { delivered: false, devCode: code };
+  }
+  return { delivered };
 }
 
 export async function verifyEmailCode(email: string, code: string): Promise<ProviderIdentity> {
