@@ -8,11 +8,32 @@ import * as silero from "@livekit/agents-plugin-silero";
 import { Session } from "../models/session.model.js";
 import { Character } from "../models/character.model.js";
 import { env } from "../config/env.js";
+import { getConversationClient, getConversationModel, isLocalConversationModel } from "../config/openai.js";
 import { logger } from "../utils/logger.js";
 import { DEFAULT_VOICE_ID } from "../data/voices.js";
 import { HumeTTS } from "./hume-tts-plugin.js";
 import { CompanionLLM } from "./voice-llm.service.js";
+import { VoiceTurnTimer } from "./voice-metrics.service.js";
+import { primeMemoryPrefetch, clearMemoryPrefetch } from "./memory-prefetch.service.js";
 import { endSessionById } from "./session.service.js";
+
+// Turn-taking tuning. Env-overridable so the numbers can be swept during a
+// latency run without a redeploy; the defaults are the shipped values.
+const intFromEnv = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+const VOICE_ENDPOINTING_MIN_MS = intFromEnv("VOICE_ENDPOINTING_MIN_MS", 300);
+const VOICE_ENDPOINTING_MAX_MS = intFromEnv("VOICE_ENDPOINTING_MAX_MS", 2500);
+const VOICE_INTERRUPTION_MIN_WORDS = intFromEnv("VOICE_INTERRUPTION_MIN_WORDS", 2);
+// Speculative TTS. Default OFF because it spends real money: audio is
+// synthesised before the turn is confirmed and thrown away whenever the caller
+// keeps talking, and TTS is ~85% of the per-minute voice cost. Set
+// VOICE_PREEMPTIVE_TTS=true to trade that spend for ~300-450ms off every turn.
+const VOICE_PREEMPTIVE_TTS = process.env["VOICE_PREEMPTIVE_TTS"] === "true";
+
 
 const FALLBACK_PROMPT =
   "You are a warm, supportive AI companion. Speak naturally and conversationally, " +
@@ -90,12 +111,38 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   const { ids, greeting, voiceId } = await resolveVoiceConfig(roomName);
 
   logger.info(
-    { roomName, voiceId, pipeline: ids ? "companion" : "degraded-generic" },
+    {
+      roomName,
+      voiceId,
+      pipeline: ids ? "companion" : "degraded-generic",
+      llm: getConversationModel(),
+    },
     "voice: starting agent session",
   );
 
+  // A local model that has been evicted takes 2-5s to load, which would land
+  // entirely on the caller's first question. Ollama keeps a model resident for
+  // a few minutes, so loading it as the call connects means it is warm by the
+  // time anyone speaks. Fire-and-forget: a failure here must not block the call,
+  // it only costs the first turn its head start.
+  if (isLocalConversationModel()) {
+    void getConversationClient()
+      .chat.completions.create({
+        model: getConversationModel(),
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 1,
+      })
+      .then(() => logger.info({ model: getConversationModel() }, "voice: local model warm"))
+      .catch((err) => logger.warn({ err }, "voice: local model warm-up failed"));
+  }
+
+  // V-03: one timer per call. Stamped by the session events below, by
+  // CompanionLLM on its first token, and by the Hume plugin on its first audio
+  // frame — which is where each turn's line gets emitted.
+  const timer = new VoiceTurnTimer(roomName);
+
   const humeTts = env.HUME_API_KEY
-    ? new HumeTTS(voiceId)
+    ? new HumeTTS(voiceId, timer)
     : new openai.TTS({ model: "tts-1", voice: "shimmer", apiKey: env.OPENAI_API_KEY });
 
   // The real path: every turn goes through streamConversation(), so voice gets
@@ -103,7 +150,7 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   // usage summary, Redis session context and ConversationTurn persistence.
   // Persisted turns are also what make memory extraction work for voice calls.
   const companionLlm = ids
-    ? new CompanionLLM(ids)
+    ? new CompanionLLM(ids, timer)
     : new openai.LLM({ model: "gpt-4o-mini", apiKey: env.OPENAI_API_KEY });
 
   const session = new voice.AgentSession({
@@ -111,6 +158,43 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
     llm: companionLlm,
     tts: humeTts,
     vad: await silero.VAD.load(),
+
+    // V-04: turn-taking was left entirely at defaults. These ship with
+    // @livekit/agents, cost nothing extra, and are the largest slice of the
+    // latency budget we actually control. Verified against the installed
+    // types for the pinned version (1.6.2), not the published docs:
+    // voice/turn_config/{endpointing,interruption,preemptive_generation}.d.ts
+    turnHandling: {
+      endpointing: {
+        // Default is 500ms. This is time added to EVERY turn, spent waiting to
+        // be sure the caller stopped talking. 300ms is the value LiveKit
+        // itself uses for streaming turn detectors
+        // (streamingEndpointingOptions), so it is a tested floor rather than a
+        // guess. Raise it if the companion starts cutting people off
+        // mid-sentence; that is the failure mode this trades against.
+        minDelay: VOICE_ENDPOINTING_MIN_MS,
+        // Default is 3000ms. The ceiling only applies to a caller who trails
+        // off without a clear stop, and 3s of dead air is well past the point
+        // it reads as broken.
+        maxDelay: VOICE_ENDPOINTING_MAX_MS,
+      },
+      interruption: {
+        // Default minWords is 0 — ANY detected speech cuts the companion off,
+        // which is why a breath or an "mm-hm" stops it mid-sentence. Requiring
+        // two words means backchannel no longer kills the reply, while a real
+        // interruption still lands immediately.
+        minWords: VOICE_INTERRUPTION_MIN_WORDS,
+        // Default 500ms. Kept — it is the duration half of the same guard.
+        minDuration: 500,
+      },
+      // preemptiveGeneration.enabled is already true by default in 1.6.2, so
+      // the model is asked to start as soon as a transcript is available
+      // rather than after the endpointing timer — that overlap is why llm_ms
+      // is measured from the transcript, not from speech-end.
+      preemptiveGeneration: {
+        preemptiveTts: VOICE_PREEMPTIVE_TTS,
+      },
+    },
   });
 
   // CompanionLLM ignores these instructions (the persona is assembled inside
@@ -127,6 +211,30 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
     void ctx.room.localParticipant
       ?.publishData(payload, { reliable: true, topic: "ui" })
       .catch((err) => logger.debug({ err }, "voice: agent state publish failed"));
+  });
+
+  // V-03 stamp 1: the caller stopped speaking. This is the instant every
+  // latency target is measured from.
+  session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
+    if (ev.oldState === "speaking" && ev.newState !== "speaking") {
+      timer.markSpeechEnd(ev.createdAt);
+    }
+  });
+
+  // V-03 stamp 2: Deepgram settled on a final transcript, which is what
+  // unblocks generation.
+  session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
+    if (ev.isFinal) {
+      timer.markSttFinal(ev.createdAt);
+      return;
+    }
+    // Not final: the caller is still talking. Start the memory lookup NOW, off
+    // the interim text, so it is already resolved by the time the turn is
+    // confirmed. Measured at ~330-580ms, this is the largest piece of
+    // pipeline prep and it does not need to be spent in silence.
+    if (ids) {
+      primeMemoryPrefetch(ids.sessionId, ids.characterId, ids.userId, ev.transcript);
+    }
   });
 
   await session.start({ agent, room: ctx.room });
@@ -151,6 +259,7 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
     // The Hume socket is shared by every turn and outlives each
     // SynthesizeStream, so nothing else will close it.
     if (humeTts instanceof HumeTTS) humeTts.closeSession();
+    if (ids) clearMemoryPrefetch(ids.sessionId);
   });
 
   // Open with a spoken greeting so the user hears the companion immediately.

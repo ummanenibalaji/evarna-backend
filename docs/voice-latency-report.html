@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Evarna — Voice Latency &amp; Audio Quality Report</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 20mm 16mm; }
+
+  :root{
+    --ink:#15181d;
+    --ink-2:#3f4753;
+    --ink-3:#6b7482;
+    --rule:#d5dae1;
+    --rule-soft:#e7ebef;
+    --bad:#a8232c;
+    --good:#1c6b52;
+    --accent:#1f3a8a;
+    --tint:#f4f6f9;
+  }
+
+  *{ box-sizing:border-box; }
+  html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{
+    margin:0; color:var(--ink); background:#fff;
+    font:10.5pt/1.55 "Charter","Georgia","Times New Roman",serif;
+  }
+  h1,h2,h3,.mono,th,.label{ font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; }
+
+  /* ---- cover ---- */
+  .cover{ padding-top:4mm; border-bottom:2.5px solid var(--ink); padding-bottom:7mm; margin-bottom:7mm; }
+  .eyebrow{ font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-size:7.5pt; letter-spacing:.18em;
+            text-transform:uppercase; color:var(--ink-3); font-weight:600; }
+  h1{ font-size:24pt; line-height:1.15; font-weight:700; letter-spacing:-.02em; margin:6px 0 8px; }
+  .sub{ font-size:11.5pt; color:var(--ink-2); max-width:52em; }
+  .meta{ margin-top:10px; font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;
+         font-size:8pt; color:var(--ink-3); letter-spacing:.02em; }
+
+  h2{ font-size:13pt; margin:8mm 0 3mm; padding-bottom:2mm; border-bottom:1px solid var(--rule);
+      letter-spacing:-.01em; page-break-after:avoid; }
+  h3{ font-size:10.5pt; margin:6mm 0 2mm; color:var(--ink); page-break-after:avoid; }
+  p{ margin:0 0 3mm; }
+  ul,ol{ margin:0 0 3mm; padding-left:5mm; }
+  li{ margin-bottom:1.4mm; }
+  strong{ font-weight:700; }
+
+  /* ---- headline result ---- */
+  .headline{ display:flex; gap:0; border:1px solid var(--rule); margin:4mm 0 5mm; }
+  .headline > div{ flex:1; padding:4mm 5mm; border-right:1px solid var(--rule-soft); }
+  .headline > div:last-child{ border-right:none; }
+  .hl-label{ font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-size:7pt; letter-spacing:.13em;
+             text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:2mm; }
+  .hl-num{ font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-size:19pt; font-weight:700;
+           letter-spacing:-.02em; line-height:1; }
+  .hl-note{ font-size:8.5pt; color:var(--ink-2); margin-top:1.5mm; }
+  .bad{ color:var(--bad); } .good{ color:var(--good); }
+
+  table{ width:100%; border-collapse:collapse; margin:3mm 0 5mm; font-size:9pt; page-break-inside:avoid; }
+  th{ text-align:left; font-size:7.5pt; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3);
+      font-weight:600; border-bottom:1.5px solid var(--ink); padding:2mm 2.5mm; }
+  td{ padding:2mm 2.5mm; border-bottom:1px solid var(--rule-soft); vertical-align:top; }
+  tr:last-child td{ border-bottom:1px solid var(--rule); }
+  td.num,th.num{ text-align:right; font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;
+                 font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .mono{ font-family:"SF Mono",Menlo,Consolas,monospace; font-size:8.5pt; }
+  code{ font-family:"SF Mono",Menlo,Consolas,monospace; font-size:8.5pt;
+        background:var(--tint); padding:.5mm 1.2mm; border-radius:2px; }
+
+  .callout{ border-left:3px solid var(--accent); background:var(--tint); padding:3mm 4mm;
+            margin:4mm 0; font-size:9.5pt; page-break-inside:avoid; }
+  .callout .label{ font-size:7.5pt; letter-spacing:.12em; text-transform:uppercase;
+                   color:var(--accent); font-weight:700; display:block; margin-bottom:1.5mm; }
+  .callout.warn{ border-left-color:var(--bad); }
+  .callout.warn .label{ color:var(--bad); }
+
+  .fix{ page-break-inside:avoid; margin:0 0 5mm; padding-left:4mm; border-left:2px solid var(--rule); }
+  .fix h3{ margin-top:0; }
+  .fix .tag{ font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-size:7pt; font-weight:700;
+             letter-spacing:.1em; color:var(--ink-3); }
+
+  footer{ margin-top:10mm; padding-top:3mm; border-top:1px solid var(--rule);
+          font-size:8pt; color:var(--ink-3); }
+  .pb{ page-break-before:always; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="eyebrow">Evarna · Lane A · Voice pipeline</div>
+  <h1>Voice latency and audio quality:<br>what was wrong, what was fixed</h1>
+  <p class="sub">Eleven defects found and fixed in the voice path, each one measured rather than
+  inferred. Includes the evidence that the original 90&nbsp;ms target is unreachable, and the one
+  remaining change worth making.</p>
+  <div class="meta">Owner: Balaji · Defects V‑01 … V‑07 · All figures measured on the development
+  machine, 24–25 August 2026</div>
+</div>
+
+<h2>1. Result</h2>
+
+<div class="headline">
+  <div>
+    <div class="hl-label">Before</div>
+    <div class="hl-num bad">3274 ms</div>
+    <div class="hl-note">p50, with audible corruption</div>
+  </div>
+  <div>
+    <div class="hl-label">After</div>
+    <div class="hl-num good">~2700 ms</div>
+    <div class="hl-note">p50, audio confirmed clean</div>
+  </div>
+  <div>
+    <div class="hl-label">Audio defects</div>
+    <div class="hl-num good">0</div>
+    <div class="hl-note">7 of 7 replies spoken in full</div>
+  </div>
+</div>
+
+<p>Latency fell by roughly 18%, but the more important outcome is that the voice is now
+<strong>correct</strong>. For most of this work the pipeline was losing about half of every reply's
+audio, which users experienced as crackling, speech that raced, and clipped final words. That is
+fixed and confirmed both by ear and in the logs.</p>
+
+<div class="callout">
+  <span class="label">The headline number understates the work</span>
+  An intermediate build reached <strong>1551 ms</strong> — but it achieved that by splitting replies
+  across multiple Hume flushes, which silently discarded half the audio. That optimisation was
+  reverted. The honest position is 2700&nbsp;ms with intact audio, not 1551&nbsp;ms with broken audio.
+</div>
+
+<h2>2. The 90 ms target is not reachable</h2>
+
+<p>The original brief asked for sub‑90&nbsp;ms. Measured from the development machine, the vendors
+alone cost more than ten times that before any Evarna code runs:</p>
+
+<table>
+  <tr><th>Dependency</th><th class="num">Round trip</th><th>Location</th><th>On critical path?</th></tr>
+  <tr><td>Hume (TTS)</td><td class="num">8 ms</td><td>edge, near you</td><td>yes</td></tr>
+  <tr><td>LiveKit (audio transport)</td><td class="num">16 ms</td><td>India South</td><td>yes</td></tr>
+  <tr><td>MongoDB Atlas</td><td class="num">31 ms</td><td>near you</td><td>yes</td></tr>
+  <tr><td>Deepgram (STT)</td><td class="num">278 ms</td><td>United States</td><td>no — finalises early</td></tr>
+  <tr><td><strong>OpenAI</strong></td><td class="num"><strong>~1000 ms</strong></td><td>US origin</td><td><strong>yes — dominant</strong></td></tr>
+</table>
+
+<p>Two further facts settle it. Hume's own first audio is <strong>380 ms warm, 920 ms cold</strong>.
+And a request to OpenAI that performs <em>no inference at all</em> — simply listing models — takes
+<strong>900–1350 ms</strong>.</p>
+
+<p>90&nbsp;ms is also shorter than the pause a human leaves between conversational turns, roughly
+200&nbsp;ms. A system that fast would read as interrupting rather than listening. The workable
+targets are <strong>P50 under 800 ms and P95 under 1200 ms</strong>.</p>
+
+<h2>3. Defects found and fixed</h2>
+
+<div class="fix">
+  <span class="tag">V‑03 · INSTRUMENTATION</span>
+  <h3>Nothing measured itself</h3>
+  <p>No timing existed anywhere in the voice path, so no change could be proven.
+  <code>getFirstChunkAt()</code> existed and was called by nothing. Added a per‑turn timer stamping
+  speech‑end, transcript‑final, first token and first audio frame, plus
+  <code>npm run latency-report</code> to read it back. Everything else in this report depends on it.</p>
+</div>
+
+<div class="fix">
+  <span class="tag">V‑04 · TURN TAKING</span>
+  <h3>Turn-taking left entirely at library defaults</h3>
+  <p>Endpointing delay was 500&nbsp;ms on <em>every</em> turn; reduced to 300&nbsp;ms, the value
+  LiveKit itself uses for streaming detectors. Interruption <code>minWords</code> was <strong>0</strong>,
+  meaning any sound cut the companion off — which is why a breath or an "mm‑hm" stopped it
+  mid‑sentence. Now 2.</p>
+</div>
+
+<div class="fix">
+  <span class="tag">V‑05 · CRITICAL PATH</span>
+  <h3>Moderation blocked the first token</h3>
+  <p>Moderation, an embedding call and an Atlas vector search all had to complete before the model
+  was asked to start. On voice, generation now begins immediately and the <em>first token</em> is
+  gated on the moderation verdict instead. The safety guarantee is unchanged — nothing unmoderated
+  ever becomes audible — but the wait now hides under the model's own thinking time.</p>
+</div>
+
+<div class="fix">
+  <span class="tag">V‑07 · COST</span>
+  <h3>Voice replies could run to 600 tokens</h3>
+  <p>Roughly 40 seconds of unstoppable speech, billed to Hume. Capped at 150 tokens on the voice
+  path; the text path is unchanged.</p>
+</div>
+
+<div class="fix">
+  <span class="tag">NEW · CRITICAL PATH</span>
+  <h3>Context compression made a blocking LLM call mid-turn</h3>
+  <p>Once a conversation passed 3500 tokens, <em>every</em> later turn paid a full non‑streaming
+  completion — 1.5 to 3 seconds — before generation could start, and it worsened the longer someone
+  talked. Compression only reduces the token bill and changes nothing the caller hears, so on voice
+  it now runs in the background and lands for the next turn.</p>
+</div>
+
+<div class="fix">
+  <span class="tag">NEW · CRITICAL PATH</span>
+  <h3>Memory retrieval sat in front of every reply</h3>
+  <p>An embedding call plus a vector search, measured at 330–580&nbsp;ms, blocking the prompt. It now
+  starts on the <em>interim</em> transcript while the caller is still speaking, so it is already
+  resolved when the turn completes. Memory search is approximate by construction, so a query a few
+  words short of final is an acceptable trade.</p>
+</div>
+
+<h2 class="pb">4. The audio corruption — and the optimisation that caused it</h2>
+
+<p>Users reported three symptoms: crackling mid‑reply, speech that sometimes raced, and final words
+cut short ("laptop" heard as "lapt"). These were repeatedly misdiagnosed as timing problems. A direct
+measurement against Hume settled it — same text, same voice:</p>
+
+<table>
+  <tr><th>How the text was sent</th><th class="num">Samples returned</th><th class="num">Duration</th><th>Verdict</th></tr>
+  <tr><td>One flush, whole sentence</td><td class="num">193,920</td><td class="num">4.04 s</td><td>correct</td></tr>
+  <tr><td>Two flushes, split at the comma</td><td class="num">94,080</td><td class="num">1.96 s</td><td class="bad">49% — half lost</td></tr>
+  <tr><td>Two flushes, serialised</td><td class="num">105,600</td><td class="num">2.20 s</td><td class="bad">still lost</td></tr>
+  <tr><td>Two flushes, back to back</td><td class="num">82,560</td><td class="num">1.72 s</td><td class="bad">still lost</td></tr>
+  <tr><td>Non‑instant mode</td><td class="num">74,880</td><td class="num">1.56 s</td><td class="bad">still lost</td></tr>
+</table>
+
+<div class="callout warn">
+  <span class="label">Root cause</span>
+  <strong>Hume's streaming input does not concatenate across flushes.</strong> Splitting a reply into
+  sentences loses roughly half the speech, regardless of timing, <code>instant_mode</code>, or where
+  the voice object is sent. The audio was never distorted — it was <em>incomplete</em>. Crackling was
+  the seams where words were missing; the racing was whole clauses absent; the clipped last word was
+  the final flush truncated.
+</div>
+
+<p>Sentence‑level flushing had been introduced deliberately to cut the token‑to‑audio stage from
+~2000&nbsp;ms to ~700&nbsp;ms. It bought that speed by destroying audio. It has been reverted to one
+flush per reply, and a check now reads the source and fails if a mid‑reply flush is ever
+reintroduced.</p>
+
+<h3>Four further audio defects, each independent</h3>
+
+<div class="fix">
+  <span class="tag">PCM DECODING</span>
+  <h3>Odd-length chunks shifted every following sample</h3>
+  <p><code>new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2)</code> — when Hume's chunk
+  had an odd byte length, the fractional length truncated and the trailing byte was silently dropped.
+  The next chunk then began mid‑sample and everything after it was shifted by one byte. The half
+  sample is now carried into the next chunk. This also fixed a latent crash: Node's pooled buffers can
+  be misaligned, and <code>Int16Array</code> throws on that inside a WebSocket handler where nothing
+  catches it.</p>
+</div>
+
+<div class="fix">
+  <span class="tag">SHARED SOCKET</span>
+  <h3>Concurrent streams stole each other's audio</h3>
+  <p>One Hume socket is shared by a whole call, but several TTS streams can be alive at once — a
+  barge‑in leaves the old one draining while its replacement starts. Audio delivery was claimed in the
+  <em>constructor</em>, so a stream that was merely created stole audio from the stream being played.
+  Separately, a superseded stream calling <code>cancelTurn()</code> set a shared discard flag and
+  silenced the turn that had replaced it. Both produced replies with visible text and no sound. Turns
+  now carry an ownership token.</p>
+</div>
+
+<div class="fix">
+  <span class="tag">CROSS-TURN LEAK</span>
+  <h3>Abandoned audio played inside the next reply</h3>
+  <p>Cancelling a turn does not stop Hume generating — it only stops us reading. The discard flag was
+  cleared unconditionally when the next turn began, so the tail of the abandoned reply was delivered
+  into the new turn's queue and played as part of it. Two utterances interleaved. The abandoned
+  generation is now counted out before anything new is accepted.</p>
+</div>
+
+<div class="fix">
+  <span class="tag">TAIL</span>
+  <h3>The final audio chunk was dropped on abort</h3>
+  <p>The drain loop holds one chunk back so it can mark the true final frame. On abort it broke
+  <em>without emitting it</em>, removing the tail of the last word. Now emitted before leaving.</p>
+</div>
+
+<h2>5. What remains, and what to do about it</h2>
+
+<p>Every lever inside Evarna's code has been pulled. The remaining latency belongs to vendors and
+geography. Three options were evaluated; only one is worth doing.</p>
+
+<h3>Recommended — move the LLM, not the worker</h3>
+
+<p>A controlled comparison of the <em>same</em> Azure service in two regions isolates distance from
+compute:</p>
+
+<table>
+  <tr><th>Azure region</th><th class="num">TCP</th><th class="num">TLS</th><th class="num">Full HTTPS round trip</th></tr>
+  <tr><td><strong>Central India</strong></td><td class="num">24 ms</td><td class="num">73 ms</td><td class="num good"><strong>94 ms</strong></td></tr>
+  <tr><td>South India</td><td class="num">27 ms</td><td class="num">79 ms</td><td class="num">100 ms</td></tr>
+  <tr><td>East US</td><td class="num">223 ms</td><td class="num">676 ms</td><td class="num bad">1136 ms</td></tr>
+</table>
+
+<p>Azure East US costs 1136&nbsp;ms from this network — almost exactly what OpenAI costs. The delay is
+not OpenAI being slow; it is what <em>any</em> US‑hosted API costs from here. Azure OpenAI in Central
+India would replace ~256&nbsp;ms of network with ~25&nbsp;ms.</p>
+
+<p><strong>Expected gain: 350–600 ms</strong>, taking end‑to‑end latency to roughly
+<strong>2100–2400 ms</strong>. Only the network leg is measured; inference time is unknown and could
+give some of that back as queueing. Two things to verify before committing: that
+<code>gpt-4o-mini</code> is available in Central India, and that the quota is high enough not to queue.
+The code change is small — <code>src/config/openai.ts</code> is 18 lines.</p>
+
+<h3>Rejected — moving the voice worker to the US</h3>
+
+<p>This was the initial recommendation and measurement overturned it. Three of the four services the
+worker talks to constantly — LiveKit, Atlas and Hume — are already nearby. Moving to the US would fix
+OpenAI but add ~250&nbsp;ms to LiveKit audio in and out, and ~200&nbsp;ms to Atlas. Net gain shrinks to
+roughly 350&nbsp;ms while permanently degrading every Indian user's audio path.</p>
+
+<h3>Rejected — OpenAI regional endpoints</h3>
+
+<p><code>jp.api.openai.com</code> and <code>eu.api.openai.com</code> exist and return 200, but they are
+for data residency, not latency. Japan — far closer than the US — measured
+<strong>consistently slower</strong> (1.48 s vs 1.02 s). No India or Asia‑Pacific endpoint exists.</p>
+
+<h3>Available but not recommended — parallel Hume connections</h3>
+
+<p>One socket per sentence <em>does</em> avoid the data loss: 264,936 samples against a 193,920
+baseline, nothing missing. But each sentence gets its own prosody envelope, so the reply runs
+<strong>37% longer</strong> with an audible beat between sentences. Given that clean, natural audio was
+just recovered at considerable cost, spending it on latency is not advised.</p>
+
+<h2>6. Verification</h2>
+
+<p>Three suites guard this work. The audio checks are offline and run in seconds.</p>
+
+<table>
+  <tr><th>Command</th><th class="num">Assertions</th><th>Covers</th></tr>
+  <tr><td class="mono">check:voice-tts-ownership</td><td class="num">14</td><td>socket ownership, cross-turn leak, PCM decoding, one-flush rule</td></tr>
+  <tr><td class="mono">check:voice-latency</td><td class="num">10</td><td>the moved safety gate, reply cap, persistence</td></tr>
+  <tr><td class="mono">smoke</td><td class="num">71</td><td>full pipeline, crisis path unchanged</td></tr>
+</table>
+
+<p>The moderation change relocated a <em>safety gate</em>, so <code>check:voice-latency</code> exists
+specifically to prove that a crisis message on the voice path yields the crisis response first and
+leaks zero pre‑verdict model tokens. <code>smoke</code> covers only the text path and would not catch
+a regression there.</p>
+
+<div class="callout">
+  <span class="label">Recommended next step</span>
+  Run twenty varied utterances — clean sentences, mid‑sentence pauses, single words, deliberate
+  interruptions — and read the result with <code>npm run latency-report</code>. Four to seven turns is
+  too thin to set a p50 against. That twenty‑turn run is the artefact that settles whether Evarna stays
+  on a cascade or moves to a speech‑to‑speech model.
+</div>
+
+<footer>
+  Evarna · Lane A voice pipeline · All measurements taken on the development machine in India,
+  24–25 August 2026. Vendor figures will differ from other locations and from production hosting.
+</footer>
+
+</body>
+</html>

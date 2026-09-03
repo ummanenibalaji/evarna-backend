@@ -1,7 +1,7 @@
 {
   "name": "evarna-backend",
   "version": "1.0.0",
-  "description": "Whisper AI companion backend — Phase 1",
+  "description": "Whisper AI companion backend \u2014 Phase 1",
   "type": "module",
   "scripts": {
     "dev": "nodemon --exec tsx src/server.ts",
@@ -17,9 +17,12 @@
     "check:outreach": "tsx src/checks/outreach.check.ts",
     "check:adaptation": "tsx src/checks/adaptation.check.ts",
     "check:activity": "tsx src/checks/activity.check.ts",
+    "check:voice-latency": "tsx src/checks/voice-latency.check.ts",
+    "check:voice-tts-ownership": "tsx src/checks/voice-tts-ownership.check.ts",
     "smoke": "tsx src/checks/smoke.ts",
     "setup:db": "tsx src/scripts/setup-db.ts",
-    "purge:studio-memories": "tsx src/scripts/purge-studio-memories.ts"
+    "purge:studio-memories": "tsx src/scripts/purge-studio-memories.ts",
+    "latency-report": "tsx src/scripts/latency-report.ts"
   },
   "dependencies": {
     "@deepgram/sdk": "^4.11.3",
