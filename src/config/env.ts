@@ -30,6 +30,13 @@ export const env = {
   GOOGLE_CLIENT_IDS: process.env["GOOGLE_CLIENT_IDS"] ?? "",
   APPLE_CLIENT_IDS: process.env["APPLE_CLIENT_IDS"] ?? "",
   // Optional: without it, email sign-in codes are logged instead of sent.
+  // Swappable conversation model. Empty = OpenAI. Set to any OpenAI-compatible
+  // endpoint (Ollama: http://localhost:11434/v1) to move the reply model off
+  // the network. Embeddings and moderation deliberately stay on OpenAI —
+  // see config/openai.ts.
+  LLM_BASE_URL: process.env["LLM_BASE_URL"] ?? "",
+  LLM_MODEL: process.env["LLM_MODEL"] ?? "",
+  LLM_API_KEY: process.env["LLM_API_KEY"] ?? "",
   RESEND_API_KEY: process.env["RESEND_API_KEY"] ?? "",
   EMAIL_FROM: process.env["EMAIL_FROM"] ?? "Evarna <noreply@evarna.app>",
 } as const;

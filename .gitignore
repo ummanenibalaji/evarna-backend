@@ -6,3 +6,5 @@ dist/
 *.log
 .DS_Store
 package-lock.json
+# Redis snapshot, written when redis-server is run from the repo root
+dump.rdb

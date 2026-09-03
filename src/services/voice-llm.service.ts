@@ -3,7 +3,8 @@ import { llm } from "@livekit/agents";
 import { DEFAULT_API_CONNECT_OPTIONS } from "@livekit/agents";
 import type { APIConnectOptions } from "@livekit/agents";
 import { streamConversation } from "./conversation.service.js";
-import { MODELS } from "../config/openai.js";
+import type { VoiceTurnTimer } from "./voice-metrics.service.js";
+import { getConversationModel } from "../config/openai.js";
 import { logger } from "../utils/logger.js";
 
 // ── CompanionLLM ──────────────────────────────────────────────────────────────
@@ -35,7 +36,11 @@ const SPOKEN_FALLBACK =
   "Sorry, I lost my train of thought there. Could you say that again?";
 
 export class CompanionLLM extends llm.LLM {
-  constructor(private readonly ids: CompanionLLMOptions) {
+  constructor(
+    private readonly ids: CompanionLLMOptions,
+    // Optional so the degraded path and tests can construct one without metrics.
+    private readonly timer?: VoiceTurnTimer,
+  ) {
     super();
   }
 
@@ -44,7 +49,9 @@ export class CompanionLLM extends llm.LLM {
   }
 
   override get model(): string {
-    return MODELS.CONVERSATION;
+    // Report the model that actually answers, so LiveKit's metrics and the
+    // persisted turns agree with reality when a local endpoint is in use.
+    return getConversationModel();
   }
 
   override get provider(): string {
@@ -65,7 +72,7 @@ export class CompanionLLM extends llm.LLM {
     return new CompanionLLMStream(this, this.ids, {
       chatCtx,
       connOptions: connOptions ?? DEFAULT_API_CONNECT_OPTIONS,
-    });
+    }, this.timer);
   }
 }
 
@@ -92,6 +99,7 @@ class CompanionLLMStream extends llm.LLMStream {
     companionLlm: CompanionLLM,
     private readonly ids: CompanionLLMOptions,
     opts: { chatCtx: llm.ChatContext; connOptions: APIConnectOptions },
+    private readonly timer?: VoiceTurnTimer,
   ) {
     super(companionLlm, opts);
   }
@@ -129,6 +137,10 @@ class CompanionLLMStream extends llm.LLMStream {
           // through the same channel as a normal chunk.
           case "chunk":
           case "crisis":
+            // V-03: the first content to leave the pipeline, whatever its
+            // source. Stamped here rather than inside streamConversation so it
+            // measures what actually reached the TTS stage.
+            if (!emitted) this.timer?.markLlmFirstToken();
             emitted = true;
             this.queue.put({ id, delta: { role: "assistant", content: event.content } });
             break;
