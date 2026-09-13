@@ -6,6 +6,7 @@ import { Character } from "../models/character.model.js";
 import { initSessionContext } from "../services/session-context.service.js";
 import { endSessionById } from "../services/session.service.js";
 import { findOwnedCharacter, findOwnedSession } from "../services/account.service.js";
+import { canStart, refuse } from "../services/entitlement.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
 
@@ -47,6 +48,19 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const owned = await findOwnedCharacter(user_id, character_id);
     if (!owned) {
       return reply.status(404).send({ success: false, error: "Character not found" });
+    }
+
+    // The entitlement gate, for voice kinds only — text is metered per message
+    // on the send route, not per session.
+    //
+    // This route accepts session_type "voice_call" and creates a real voice
+    // session with no LiveKit room, so gating only /voice/sessions/start would
+    // leave the minute meter open through here. Deliberately after the
+    // ownership check: someone else's companion must stay a 404 rather than
+    // answering with a balance.
+    if (session_type !== "text") {
+      const gate = await canStart(user_id, "voice");
+      if (!gate.allowed) return refuse(reply, gate);
     }
 
     const session = await Session.create({

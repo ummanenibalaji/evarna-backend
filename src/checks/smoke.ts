@@ -41,6 +41,8 @@ import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { Character } from "../models/character.model.js";
 import { User } from "../models/user.model.js";
 import { Memory } from "../models/memory.model.js";
+import { Session } from "../models/session.model.js";
+import { Subscription } from "../models/subscription.model.js";
 import { runOutreachSweep } from "../services/outreach.service.js";
 
 const BASE_URL = "http://localhost:3000";
@@ -595,6 +597,17 @@ async function run(): Promise<void> {
   assert.equal(reread.json.data!.name, renamed, "the rename did not persist");
   ok(`PATCH /characters/:id renamed the companion ("${renamed}")`);
 
+  // Put the name back. The timestamp exists only to prove the write landed, and
+  // leaving it behind meant every account this check has ever created still has
+  // a companion called "Maya-1789239123815" — which is what the app then shows
+  // on the home card and in the settings list.
+  const restored = await api<{ name: string }>("PATCH", `/characters/${characterId}`, a.token, {
+    name: "Maya",
+  });
+  assert.equal(restored.status, 200, `restoring the name failed: ${JSON.stringify(restored.json)}`);
+  assert.equal(restored.json.data!.name, "Maya", "the companion was left with a test name");
+  ok("the test name is not left behind");
+
   const badVoice = await api("PATCH", `/characters/${characterId}`, a.token, {
     voice_id: "not-a-voice-in-the-catalog",
   });
@@ -787,9 +800,263 @@ async function run(): Promise<void> {
   );
   ok("a brand-new account sees zeros, not a fabricated streak");
 
+  // ── 20 ────────────────────────────────────────────────────────────────────
+  step("20. the entitlement gate (a regression here gives the product away)");
+  await runEntitlementChecks(a.token, a.user_id, characterId);
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);
+}
+
+/**
+ * The gate that decides whether anything costs us money.
+ *
+ * Every refusal below happens before generation starts, so this whole section
+ * spends nothing on OpenAI, Hume or LiveKit — the synthetic usage is written
+ * straight into Mongo rather than talked into existence.
+ *
+ * It asserts the four things that would each be a hole in the paywall:
+ * both voice entry points refuse an exhausted account (the second one,
+ * POST /sessions/start with session_type "voice_call", creates a real voice
+ * session with no LiveKit room and was the bypass), a paying subscriber gets
+ * through, a lapsed one does not, and the daily text cap arrives as a parseable
+ * refusal rather than an SSE error bubble.
+ */
+async function runEntitlementChecks(
+  token: string,
+  userId: string,
+  characterId: string,
+): Promise<void> {
+  interface EntitlementBody {
+    tier: string;
+    voice: { allowance_seconds: number; used_seconds: number; remaining_seconds: number };
+    status: string;
+    text: { daily_cap: number; used_today: number; remaining_today: number };
+    period: { end: string; renews_at: string; source: string };
+    plans: unknown[];
+    topup_packs: unknown[];
+  }
+
+  const entitlement = async (): Promise<EntitlementBody> => {
+    const res = await api<EntitlementBody>("GET", "/billing/entitlement", token);
+    assert.equal(res.status, 200, `GET /billing/entitlement → ${res.status}`);
+    return res.json.data!;
+  };
+
+  // remember:false throughout: ending a session with memory enabled enqueues a
+  // memory-extraction job, which is an LLM call. This section spends nothing.
+  const startVoice = (): Promise<{ status: number; json: Envelope<{ session_id: string }> }> =>
+    api<{ session_id: string }>("POST", "/sessions/start", token, {
+      character_id: characterId,
+      session_type: "voice_call",
+      remember: false,
+    });
+
+  // A free account, before anything is spent. The allowance is the product
+  // decision (8 minutes), and the app reads prices from here rather than
+  // hardcoding them — which is how it came to advertise 500 minutes for a
+  // 400-minute tier and a renewal date of "June 1, 2026" for everyone.
+  const fresh = await entitlement();
+  assert.equal(fresh.tier, "free", `a never-purchased account reports "${fresh.tier}"`);
+  assert.equal(fresh.voice.allowance_seconds, 480, "the free voice allowance is not 8 minutes");
+  assert.equal(fresh.text.daily_cap, 100, "the free message cap is not 100/day");
+  assert.ok(new Date(fresh.period.renews_at).getTime() > Date.now(), "the period has already ended");
+  assert.ok(fresh.plans.length >= 2 && fresh.topup_packs.length >= 3, "the response carries no catalog");
+  ok(`free account: ${fresh.voice.remaining_seconds}s of ${fresh.voice.allowance_seconds}s left, renews ${fresh.period.renews_at.slice(0, 10)}`);
+  const baseline = fresh.voice.used_seconds;
+
+  // Everything from here writes rows, so the teardown below has to cover every
+  // path out — an assertion failing mid-section would otherwise leave this
+  // account holding a paid subscription and a spent allowance, and the next
+  // run would fail somewhere unrelated.
+  const now = Date.now();
+  const created: { sessions: Types.ObjectId[]; turns: Types.ObjectId[] } = { sessions: [], turns: [] };
+  const signedUpAt = (await User.findById(userId).select("created_at").lean())!.created_at;
+  try {
+    // This account was created seconds ago, so its billing period starts
+    // seconds ago — and a session can only bill what has actually elapsed since
+    // it started (a forged `ended_at` would otherwise claim any duration). Both
+    // rules are right in production and together they leave no room to write a
+    // ten-minute call, so the signup date is moved back for this section and
+    // restored in the teardown.
+    await User.updateOne({ _id: userId }, { $set: { created_at: new Date(now - 3 * 3_600_000) } });
+    // Ten minutes of calls against an eight-minute allowance. Written directly:
+    // talking for ten minutes would cost about eighty-five cents of TTS.
+    const spent = await Session.create({
+      user_id: userId,
+      character_id: new Types.ObjectId(characterId),
+      session_type: "voice_call",
+      mode: "companion",
+      status: "completed",
+      started_at: new Date(now - 600_000),
+      ended_at: new Date(now),
+      duration_seconds: 600,
+    });
+    created.sessions.push(spent._id);
+
+    const overspent = await entitlement();
+    assert.ok(overspent.voice.used_seconds - baseline >= 600, `used_seconds is ${overspent.voice.used_seconds}, expected at least 600`);
+    assert.equal(overspent.voice.remaining_seconds, 0, "an overspent balance must clamp to zero, never go negative");
+    ok("a completed call is counted against the period allowance");
+
+    const refusedVoice = await api("POST", "/voice/sessions/start", token, { character_id: characterId });
+    assert.equal(refusedVoice.status, 402, `exhausted voice start → ${refusedVoice.status}, expected 402`);
+    assert.equal(refusedVoice.json.code, "VOICE_MINUTES_EXHAUSTED", "the refusal must carry a code the app can branch on");
+    ok("POST /voice/sessions/start refuses an exhausted account (402)");
+
+    // The bypass. This route accepts session_type "voice_call" too, and gating
+    // only the LiveKit route would have left the meter open through here.
+    const refusedStart = await startVoice();
+    assert.equal(refusedStart.status, 402, `exhausted /sessions/start → ${refusedStart.status}, expected 402`);
+    assert.equal(refusedStart.json.code, "VOICE_MINUTES_EXHAUSTED");
+    ok("POST /sessions/start refuses a voice session too — the bypass is closed");
+
+    // A sweep-closed call bills its duration MINUS the 30-minute idle window the
+    // sweep waited through, because that duration is never a measurement of
+    // talking. Billing it whole would zero a free month whenever our own worker
+    // restarted; billing a flat token amount would make force-quitting the app a
+    // discount on an hour of TTS.
+    await Session.deleteOne({ _id: spent._id });
+    created.sessions = [];
+    const swept = await Session.create({
+      user_id: userId,
+      character_id: new Types.ObjectId(characterId),
+      session_type: "voice_call",
+      mode: "companion",
+      status: "interrupted",
+      started_at: new Date(now - 2_400_000),
+      ended_at: new Date(now),
+      duration_seconds: 2_400,
+    });
+    created.sessions.push(swept._id);
+    const sweptView = await entitlement();
+    // Measured against what this account had already used before the section
+    // started (section 10 leaves a real two-second call behind).
+    assert.equal(
+      sweptView.voice.used_seconds - baseline,
+      600,
+      `a 40-minute swept session billed ${sweptView.voice.used_seconds - baseline}s, expected 600 (2400 - 1800 idle)`,
+    );
+    ok("a sweep-closed call bills its talk time, not its wall clock");
+
+    // Text is unaffected by an empty voice balance: unlimited text is the whole
+    // shape of the free tier. remember:false so ending it does not enqueue a
+    // memory-extraction job — that is an LLM call, and this section spends nothing.
+    const stillTexting = await api<{ session_id: string }>("POST", "/sessions/start", token, {
+      character_id: characterId,
+      session_type: "text",
+      remember: false,
+    });
+    assert.equal(stillTexting.status, 201, "no voice minutes must not stop someone texting");
+    created.sessions.push(new Types.ObjectId(stillTexting.json.data!.session_id));
+    ok("text sessions still start with no voice minutes left");
+
+    // A paying subscriber. Upserted rather than purchased, because StoreKit is a
+    // later step — this is what `npm run grant:entitlement` does.
+    await Subscription.updateOne(
+      { user_id: userId },
+      {
+        $set: {
+          tier: "plus",
+          status: "active",
+          platform: "dev_grant",
+          product_id: "dev_grant.plus",
+          period_start: new Date(now - 86_400_000),
+          period_end: new Date(now + 29 * 86_400_000),
+          expires_at: new Date(now + 29 * 86_400_000),
+          auto_renew: false,
+          updated_at: new Date(),
+        },
+        $setOnInsert: { created_at: new Date(), topup_seconds: 0 },
+      },
+      { upsert: true },
+    );
+
+    const paid = await entitlement();
+    assert.equal(paid.tier, "plus", `a granted subscription reports "${paid.tier}"`);
+    assert.equal(paid.voice.allowance_seconds, 7_200, "plus is not 120 minutes");
+    assert.equal(paid.period.source, "subscription", "a subscriber's period must follow the purchase, not signup");
+    assert.ok(paid.voice.remaining_seconds > 6_000, `plus has only ${paid.voice.remaining_seconds}s left`);
+
+    const allowed = await startVoice();
+    assert.equal(allowed.status, 201, `a subscriber was refused: ${JSON.stringify(allowed.json)}`);
+    ok(`a Plus subscriber starts a call (${paid.voice.remaining_seconds}s remaining)`);
+    // Registered before it is ended, so a failure in between cannot leave a
+    // live voice session behind. Ending it stops the in-flight seconds it
+    // accrues from following us into the assertions below.
+    created.sessions.push(new Types.ObjectId(allowed.json.data!.session_id));
+    await api("POST", `/sessions/${allowed.json.data!.session_id}/end`, token, {});
+
+    // Lapsed. The store says the subscription ended; the tier has to go with it,
+    // or a cancelled subscriber keeps the product forever.
+    await Subscription.updateOne(
+      { user_id: userId },
+      { $set: { expires_at: new Date(now - 86_400_000), updated_at: new Date() } },
+    );
+    const lapsed = await entitlement();
+    assert.equal(lapsed.tier, "free", `an expired subscription still reports "${lapsed.tier}"`);
+    assert.equal(lapsed.status, "expired", `a lapsed subscription reports status "${lapsed.status}" — the app would read that as live`);
+    assert.equal(lapsed.period.source, "signup_anniversary", "a lapsed account must fall back to its signup anniversary");
+    const refusedAgain = await startVoice();
+    assert.equal(refusedAgain.status, 402, `a lapsed subscriber was allowed a call (${refusedAgain.status})`);
+    ok("an expired subscription falls back to free, and the gate closes again");
+
+    // The daily message cap. Inserted rather than sent: a hundred real turns is a
+    // hundred LLM calls.
+    //
+    // Dated `now` rather than a minute ago: a run that starts just after local
+    // midnight would otherwise file them under yesterday and the cap would never
+    // fire. The count is the cap itself, which over-inserts slightly because this
+    // account already sent a few real messages earlier in the run — that only
+    // makes the refusal more certain.
+    const capRows = Array.from({ length: lapsed.text.daily_cap }, (_, i) => ({
+      session_id: new Types.ObjectId(),
+      character_id: new Types.ObjectId(characterId),
+      user_id: userId,
+      role: "user" as const,
+      content_text: `${SMOKE_PREFIX} synthetic cap row ${i}`,
+      created_at: new Date(now),
+    }));
+    const inserted = await ConversationTurn.insertMany(capRows);
+    created.turns.push(...inserted.map((t) => t._id));
+
+    const capped = await fetch(`${API}/conversations/send`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ session_id: stillTexting.json.data!.session_id, message: "one more" }),
+    });
+    assert.equal(capped.status, 429, `over the daily cap → ${capped.status}, expected 429`);
+    // The refusal has to arrive BEFORE reply.hijack(), as ordinary JSON. As an
+    // SSE event the app's stream reader would render it as a generic
+    // "couldn't reach the server" bubble instead of a limit.
+    const body = (await capped.json()) as Envelope<unknown>;
+    assert.equal(body.code, "DAILY_MESSAGE_CAP", "the cap refusal must be parseable JSON with a code");
+    assert.ok(
+      Number(capped.headers.get("retry-after") ?? 0) >= 1,
+      "a throttled client needs to be told when to come back",
+    );
+    ok("the daily message cap refuses a send as JSON, with Retry-After");
+  } finally {
+    // Not optional, and not only on the happy path. The cap is per local day,
+    // so leaving the turns behind would keep this account capped until midnight
+    // in its own timezone, and leaving the subscription behind would leave it
+    // silently paid for.
+    await ConversationTurn.deleteMany({ _id: { $in: created.turns } });
+    await Session.deleteMany({ _id: { $in: created.sessions } });
+    await Subscription.deleteOne({ user_id: userId });
+    await User.updateOne({ _id: userId }, { $set: { created_at: signedUpAt } });
+  }
+
+  const restored = await entitlement();
+  assert.equal(restored.tier, "free");
+  assert.ok(restored.text.remaining_today > 0, "the synthetic cap rows were not cleaned up");
+  assert.ok(restored.voice.used_seconds < 600, "the synthetic sessions were not cleaned up");
+  ok("teardown left the account as it was found");
 }
 
 /**

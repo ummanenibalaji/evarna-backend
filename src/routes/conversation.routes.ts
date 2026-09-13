@@ -4,6 +4,7 @@ import { Types } from "mongoose";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { streamConversation } from "../services/conversation.service.js";
 import { findOwnedSession } from "../services/account.service.js";
+import { canStart, refuse } from "../services/entitlement.service.js";
 import { notifyUnreadReply } from "../services/outreach.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
@@ -45,6 +46,13 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ success: false, error: "Session not found" });
     }
     const character_id = session.character_id.toString();
+
+    // The entitlement gate, before reply.hijack() and not a line later. Once
+    // the response is hijacked a refusal can only be an SSE event, and the
+    // app's stream reader turns any of those into a generic "couldn't reach the
+    // server" bubble — so the cap would look like a bug rather than a limit.
+    const gate = await canStart(user_id, "text");
+    if (!gate.allowed) return refuse(reply, gate);
 
     // Take ownership of the raw response for SSE
     reply.hijack();

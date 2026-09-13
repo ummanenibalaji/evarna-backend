@@ -13,6 +13,7 @@ import { memoryRoutes } from "./routes/memory.routes.js";
 import { voiceRoutes } from "./routes/voice.routes.js";
 import { studioRoutes } from "./routes/studio.routes.js";
 import { reportRoutes } from "./routes/report.routes.js";
+import { billingRoutes } from "./routes/billing.routes.js";
 
 /**
  * Build the Fastify app without connecting to anything.
@@ -74,6 +75,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await app.register(voiceRoutes, { prefix: "/api/v1/voice" });
   await app.register(studioRoutes, { prefix: "/api/v1/studio" });
   await app.register(reportRoutes, { prefix: "/api/v1/reports" });
+  await app.register(billingRoutes, { prefix: "/api/v1/billing" });
 
   return app;
 }

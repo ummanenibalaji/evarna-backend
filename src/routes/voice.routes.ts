@@ -5,6 +5,7 @@ import { Session } from "../models/session.model.js";
 import { Character } from "../models/character.model.js";
 import { initSessionContext } from "../services/session-context.service.js";
 import { generateRoomToken, LiveKitNotConfiguredError } from "../services/livekit-token.service.js";
+import { canStart, refuse } from "../services/entitlement.service.js";
 import { WHISPER_VOICES } from "../data/voices.js";
 import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
@@ -45,6 +46,13 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     if (!character) {
       return reply.status(404).send({ success: false, error: "Character not found" });
     }
+
+    // The entitlement gate. A voice minute costs roughly $0.085 all-in, which
+    // is the single largest variable cost in the product, and nothing stood
+    // between this route and an unlimited one. After the ownership check so
+    // someone else's companion stays a 404.
+    const gate = await canStart(user_id, "voice");
+    if (!gate.allowed) return refuse(reply, gate);
 
     const session = await Session.create({
       user_id,

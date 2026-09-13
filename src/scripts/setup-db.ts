@@ -164,12 +164,19 @@ async function main(): Promise<void> {
   // ── 4. regular model indexes ──────────────────────────────────────────────
   // The Mongoose schemas declare compound indexes that otherwise only get built
   // lazily. Import the models so their schemas register, then sync.
+  //
+  // This list is hand-maintained, which means it goes stale silently — a model
+  // missing from it simply never has its indexes synced here. follow-up and
+  // report were both missing until now. Add every new model.
   await import("../models/user.model.js");
   await import("../models/character.model.js");
   await import("../models/session.model.js");
   await import("../models/conversation-turn.model.js");
   await import("../models/memory.model.js");
   await import("../models/memory-summary.model.js");
+  await import("../models/follow-up.model.js");
+  await import("../models/report.model.js");
+  await import("../models/subscription.model.js");
 
   for (const name of Object.keys(mongoose.models)) {
     await mongoose.models[name]!.syncIndexes();

@@ -44,4 +44,11 @@ const sessionSchema = new Schema<ISession>(
 // Compound index: stale-session cleanup queries { status: "active", started_at: < cutoff }
 sessionSchema.index({ status: 1, started_at: 1 });
 
+// Compound index: the entitlement gate sums this period's voice seconds with
+// { user_id, session_type: $in [...], started_at: within period } on every call
+// start, and /users/me/activity buckets { user_id } by day. The single-field
+// user_id index above cannot serve either without scanning a user's whole
+// history, which grows without bound.
+sessionSchema.index({ user_id: 1, started_at: -1 });
+
 export const Session = model<ISession>("Session", sessionSchema);
