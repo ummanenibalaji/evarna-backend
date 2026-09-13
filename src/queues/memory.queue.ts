@@ -83,3 +83,11 @@ export async function scheduleOutreachSweep(): Promise<void> {
     },
   );
 }
+
+/** Graceful shutdown: releases the queue's Redis connections. */
+export async function closeMemoryQueue(): Promise<void> {
+  if (memoryQueue) {
+    await memoryQueue.close();
+    memoryQueue = null;
+  }
+}

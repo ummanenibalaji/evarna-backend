@@ -286,11 +286,75 @@ export function buildPersonaBlock(persona: IPersonaConfig): string {
   return parts.join("\n");
 }
 
+// ── Honesty ───────────────────────────────────────────────────────────────────
+
+/**
+ * Sent for every character, whatever the archetype or mode.
+ *
+ * Measured, not assumed: told "I didn't prepare at all, but it's their fault for
+ * asking weird questions", gpt-4o-mini answered "it's great that you're
+ * reflecting on your preparation" — it praised the excuse. A companion that
+ * agrees with everything is pleasant for a week and worthless after, because its
+ * agreement stops meaning anything.
+ *
+ * Deliberately silent on HOW bluntly to disagree. That belongs to each
+ * archetype ("validate first" vs "name excuses plainly") and to the directness
+ * slider, both of which come earlier. This only decides that the companion does
+ * not pretend to agree.
+ */
+export const HONESTY_BLOCK = [
+  `[Honesty]`,
+  `Being on their side is not the same as agreeing with them. People who care about someone tell them what they actually think.`,
+  `- Take their feelings seriously, always. Their conclusions, their plans and their account of what happened are things you can question.`,
+  `- If they are blaming others for something they had a real hand in, being unfair to themselves, or about to do something likely to hurt them, say what you honestly think: once, plainly, kindly. Then it is their call.`,
+  `- Do not praise what does not deserve it, and do not call a plan good just because they are excited about it.`,
+  `- If they push back on something you said, change your mind when they give you a reason, not because they are upset with you.`,
+  `- Do not invent disagreement either. Most of the time there is nothing to challenge, and the right thing is simply to be there.`,
+  `- How gently or bluntly you say it follows your personality and rules above.`,
+].join("\n");
+
+// ── How they sounded ──────────────────────────────────────────────────────────
+
+/**
+ * Hume EVI measures the caller's tone of voice — 48 expression scores, 0 to 1,
+ * per utterance — and sends them with each message. This is the one thing a
+ * transcript cannot carry: "I'm fine" said flatly and said brightly are the
+ * same words.
+ *
+ * Only clear signals are passed on: at most three, each at least MIN_SCORE and
+ * at least half the strongest. Most scores are low noise, and a list of twelve
+ * faint emotions reads to the model as an instruction to respond to all twelve.
+ * Words only, never numbers — the model repeats what it is given, and "your
+ * sadness is 0.62" is not something anyone should hear.
+ */
+const PROSODY_MIN_SCORE = 0.2;
+const PROSODY_MAX_SIGNALS = 3;
+
+export function describeProsody(scores?: Record<string, unknown> | null): string | null {
+  if (!scores) return null;
+  const ranked = Object.entries(scores)
+    .filter((e): e is [string, number] => typeof e[1] === "number" && Number.isFinite(e[1]))
+    .sort((a, b) => b[1] - a[1]);
+  const top = ranked[0]?.[1] ?? 0;
+  const signals = ranked
+    .filter(([, v]) => v >= PROSODY_MIN_SCORE && v >= top / 2)
+    .slice(0, PROSODY_MAX_SIGNALS)
+    .map(([name, v]) => `${name.toLowerCase()} (${v >= 0.5 ? "strongly" : v >= 0.3 ? "clearly" : "a little"})`);
+  if (signals.length === 0) return null;
+
+  return [
+    `[How they sounded just now]`,
+    `Their tone of voice carried: ${signals.join(", ")}.`,
+    `This is from how they said it, not what they said. Let it shape your reply. If their words say they are fine and their voice does not, respond to the voice, gently.`,
+    `You can notice it the way a friend on the phone would ("you sound wiped"), but never mention detecting, measuring or analysing anything.`,
+  ].join("\n");
+}
+
 // ── Prompt assembly ───────────────────────────────────────────────────────────
 
 // Prompt order: system persona → companion identity → personalization →
-//               memory block → usage summary → compressed older turns →
-//               verbatim recent turns → user message
+//               honesty → memory block → usage summary → compressed older turns →
+//               verbatim recent turns → how they sounded → user message
 export function assemblePrompt(
   persona: IPersonaConfig,
   identity: CompanionIdentity,
@@ -299,6 +363,7 @@ export function assemblePrompt(
   memoryBlock?: string | null,
   usageSummary?: string | null,
   personalization?: UserPersonalizationContext | null,
+  prosody?: Record<string, unknown> | null,
 ): AssembledPrompt {
   const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
 
@@ -308,6 +373,8 @@ export function assemblePrompt(
   if (personalization) {
     messages.push({ role: "system", content: buildPersonalizationBlock(personalization) });
   }
+
+  messages.push({ role: "system", content: HONESTY_BLOCK });
 
   if (memoryBlock) {
     messages.push({ role: "system", content: memoryBlock });
@@ -330,6 +397,11 @@ export function assemblePrompt(
       content: turn.content,
     });
   }
+
+  // Directly before the message it describes, so it reads as being about this
+  // turn rather than the conversation as a whole.
+  const tone = describeProsody(prosody);
+  if (tone) messages.push({ role: "system", content: tone });
 
   messages.push({ role: "user", content: userMessage });
 

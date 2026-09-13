@@ -11,6 +11,7 @@ import { invalidateCharacterConfig } from "../services/session-context.service.j
 import { getVoice } from "../data/voices.js";
 import { getUserId } from "../middleware/auth.js";
 import { getSuggestion, resolveSuggestion } from "../services/adaptation.service.js";
+import { USAGE_LIMITS } from "../services/usage.service.js";
 
 // No `user_id` field: the owner is whoever holds the token.
 const CreateBodySchema = z.object({
@@ -52,10 +53,22 @@ export async function characterRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    const userId = getUserId(request);
+    // Mirrors the Studio cap. Each companion carries memory extraction, usage
+    // summaries and outreach, so the count is a cost, not just a list length.
+    const existing = await Character.countDocuments({ user_id: userId, mode: "companion", is_active: true });
+    if (existing >= USAGE_LIMITS.companions) {
+      return reply.status(403).send({
+        success: false,
+        error: `You can have up to ${USAGE_LIMITS.companions} companions. Delete one to make room.`,
+        code: "COMPANION_LIMIT_REACHED",
+      });
+    }
+
     try {
       const character = await createCompanion({
         ...parsed.data,
-        user_id: getUserId(request),
+        user_id: userId,
       });
       return reply.status(201).send({
         success: true,

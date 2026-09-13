@@ -45,13 +45,14 @@ async function runCleanup(): Promise<void> {
   }
 }
 
-export function startStaleSessionCleanup(): void {
+export function startStaleSessionCleanup(): NodeJS.Timeout {
   // Run once at startup to catch anything left open from a previous crash/restart
   void runCleanup().catch((err) => logger.error({ err }, "Stale cleanup: initial run failed"));
 
-  setInterval(() => {
+  const timer = setInterval(() => {
     void runCleanup().catch((err) => logger.error({ err }, "Stale cleanup: interval run failed"));
   }, CHECK_INTERVAL_MS);
 
   logger.info("Stale session cleanup started (interval: 5 min, idle threshold: 30 min)");
+  return timer;
 }

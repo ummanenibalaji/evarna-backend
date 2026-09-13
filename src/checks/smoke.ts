@@ -41,9 +41,12 @@ import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { Character } from "../models/character.model.js";
 import { User } from "../models/user.model.js";
 import { Memory } from "../models/memory.model.js";
+import { isQuietHours, runOutreachSweep } from "../services/outreach.service.js";
 import { Session } from "../models/session.model.js";
 import { Subscription } from "../models/subscription.model.js";
-import { runOutreachSweep } from "../services/outreach.service.js";
+import { issueClmToken } from "../services/auth.service.js";
+import { initSessionContext } from "../services/session-context.service.js";
+import { USAGE_LIMITS, VOICE_LIMIT_LINE } from "../services/usage.service.js";
 
 const BASE_URL = "http://localhost:3000";
 const API = `${BASE_URL}/api/v1`;
@@ -801,7 +804,18 @@ async function run(): Promise<void> {
   ok("a brand-new account sees zeros, not a fabricated streak");
 
   // ── 20 ────────────────────────────────────────────────────────────────────
-  step("20. the entitlement gate (a regression here gives the product away)");
+  step("20. the EVI voice-model endpoint answers only for its own call");
+  await runEviModelChecks(a.token, a.user_id, characterId);
+
+  // ── 21 ────────────────────────────────────────────────────────────────────
+  step("21. usage ceilings are enforced by the server, not the app");
+  await runUsageLimitChecks(a.token, a.user_id, characterId, reborn.token, reborn.user_id);
+
+  // ── 22 ────────────────────────────────────────────────────────────────────
+  // After 21 deliberately: the ceilings there are per-minute and per-day
+  // counters in Redis, and this section drives the per-tier gate on top of
+  // them. It resets the subscription and its own rows on the way out.
+  step("22. the entitlement gate (a regression here gives the product away)");
   await runEntitlementChecks(a.token, a.user_id, characterId);
 
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
@@ -1147,6 +1161,189 @@ async function runUnreadReplyChecks(
 }
 
 /**
+ * Before these, a signed-in script could run unlimited replies and calls on our
+ * bill. Counters and usage are preset directly rather than hit hundreds of
+ * times, so this section makes no model calls.
+ */
+async function runUsageLimitChecks(
+  aToken: string, aUserId: string, characterId: string, otherToken: string, otherUserId: string,
+): Promise<void> {
+  // Messages: refused as plain JSON before the stream starts, with nothing stored.
+  const started = await api<{ session_id: string }>("POST", "/sessions/start", aToken, {
+    character_id: characterId, session_type: "text",
+  });
+  const sessionId = started.json.data!.session_id;
+  const dayKey = `usage:msg:day:${aUserId}`;
+  await getRedis().set(dayKey, String(USAGE_LIMITS.messagesPerDay), "EX", 120);
+  try {
+    const res = await fetch(`${API}/conversations/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${aToken}` },
+      body: JSON.stringify({ session_id: sessionId, message: "[smoke] one over the limit" }),
+    });
+    assert.equal(res.status, 429, "a message over the daily ceiling was accepted");
+    const body = (await res.json()) as { code?: string; limit?: string; error?: string };
+    assert.equal(body.code, "USAGE_LIMIT_REACHED");
+    assert.equal(body.limit, "messages_per_day");
+    assert.ok(body.error && !/\d{3}/.test(body.error), "the refusal must carry a message the app can show");
+    const turns = await ConversationTurn.countDocuments({ session_id: new Types.ObjectId(sessionId) });
+    assert.equal(turns, 0, "a refused message was still stored");
+    ok("the daily message ceiling is enforced before any model call");
+  } finally {
+    await getRedis().del(dayKey);
+  }
+
+  // Companions: filler rows up to the cap, then one more is refused.
+  const filler = await Character.collection.insertMany(
+    Array.from({ length: USAGE_LIMITS.companions }, () => ({
+      user_id: otherUserId, mode: "companion", is_active: true, name: "[smoke] cap filler",
+    })),
+  );
+  try {
+    const over = await api("POST", "/characters/create", otherToken, {
+      archetype: "mentor", gender: "female", voice_id: "any", name: "One too many",
+    });
+    assert.equal(over.status, 403, "a companion over the cap was created");
+    assert.equal(over.json.code, "COMPANION_LIMIT_REACHED");
+    ok(`a user cannot create more than ${USAGE_LIMITS.companions} companions`);
+  } finally {
+    await Character.deleteMany({ _id: { $in: Object.values(filler.insertedIds) } });
+  }
+
+  // Calls: concurrent calls, then daily minutes, then the EVI path mid-call.
+  const fakeCharacter = new Types.ObjectId();
+  const call = (fields: Record<string, unknown>) => ({
+    user_id: otherUserId, character_id: fakeCharacter, session_type: "voice_call", mode: "companion",
+    status: "active", started_at: new Date(), ...fields,
+  });
+  const startCall = () => api("POST", "/voice/sessions/start", otherToken, { character_id: fakeCharacter.toString() });
+  try {
+    await Session.insertMany(Array.from({ length: USAGE_LIMITS.concurrentCalls }, () => call({})));
+    const busy = await startCall();
+    assert.equal(busy.status, 429, "a call over the concurrent limit was started");
+    assert.equal((busy.json as { limit?: string }).limit, "concurrent_calls");
+    ok("parallel calls are capped");
+
+    await Session.deleteMany({ user_id: otherUserId, character_id: fakeCharacter });
+    await Session.create(call({
+      status: "completed", started_at: new Date(Date.now() - 3_600_000), ended_at: new Date(),
+      duration_seconds: USAGE_LIMITS.voiceMinutesPerDay * 60,
+    }));
+    const spent = await startCall();
+    assert.equal(spent.status, 429, "a call was started with no voice minutes left");
+    assert.equal((spent.json as { limit?: string }).limit, "voice_minutes_per_day");
+    ok("a call cannot start once the day's minutes are used");
+
+    const live = await Session.create(call({}));
+    const version = (await User.findById(otherUserId).select("token_version").lean())?.token_version ?? 0;
+    const token = await issueClmToken(otherUserId, live._id.toString(), version);
+    const evi = await fetch(`${API}/voice/clm/chat/completions?custom_session_id=${live._id.toString()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ messages: [{ role: "user", content: "[smoke] are you still there?" }] }),
+    });
+    assert.equal(evi.status, 200, "EVI must get a speakable response, not an error it reads as a crash");
+    const spoken = await evi.text();
+    assert.ok(spoken.includes(JSON.stringify(VOICE_LIMIT_LINE).slice(1, 20)), "the limit line was not spoken");
+    assert.ok(spoken.trim().endsWith("data: [DONE]"));
+    assert.equal(await ConversationTurn.countDocuments({ session_id: live._id }), 0, "a reply was generated past the limit");
+    ok("a call that runs out of minutes is told so, and nothing more is generated");
+  } finally {
+    await Session.deleteMany({ user_id: otherUserId, character_id: fakeCharacter });
+  }
+}
+
+/**
+ * Hume EVI calls this endpoint, not the app, and its token passes through a
+ * third party. What matters is that the token opens exactly one live call and
+ * nothing else — and that the reply still goes through the full pipeline.
+ *
+ * Tokens are minted directly because the start route needs a Hume EVI config,
+ * which a development machine will not have. Costs one conversation reply.
+ */
+async function runEviModelChecks(appToken: string, userId: string, characterId: string): Promise<void> {
+  const version = (await User.findById(userId).select("token_version").lean())?.token_version ?? 0;
+  const newCall = async (): Promise<string> => {
+    const session = await Session.create({
+      user_id: userId,
+      character_id: new Types.ObjectId(characterId),
+      session_type: "voice_call",
+      mode: "companion",
+      status: "active",
+      started_at: new Date(),
+    });
+    await initSessionContext(session._id.toString());
+    return session._id.toString();
+  };
+  const post = (token: string | null, sessionId: string, body: unknown): Promise<Response> =>
+    fetch(`${API}/voice/clm/chat/completions?custom_session_id=${sessionId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(body),
+    });
+
+  const sessionId = await newCall();
+  const other = await newCall();
+  const token = await issueClmToken(userId, sessionId, version);
+  const LATEST = "[smoke] honestly I'm fine, just tired";
+  // EVI resends the whole conversation every turn, with tone scores attached.
+  const body = {
+    messages: [
+      { role: "user", content: "[smoke] something from earlier in the call" },
+      { role: "assistant", content: "an earlier reply" },
+      { role: "user", content: LATEST, models: { prosody: { scores: { Tiredness: 0.7, Sadness: 0.4, Joy: 0.02 } } } },
+    ],
+  };
+
+  try {
+    assert.equal((await post(null, sessionId, body)).status, 401, "no token must be refused");
+    assert.equal((await post(appToken, sessionId, body)).status, 401, "the app's session token must not work on the voice-model endpoint");
+    ok("refuses no token, and refuses the app's own session token");
+
+    assert.equal((await post(token, other, body)).status, 403, "a token issued for one call was accepted for another");
+    ok("a token opens only the call it was issued for");
+
+    const stale = await issueClmToken(userId, sessionId, version + 1);
+    assert.equal((await post(stale, sessionId, body)).status, 401, "a token whose version does not match the account was accepted");
+    ok("signing out everywhere revokes voice-model tokens too");
+
+    const res = await post(token, sessionId, body);
+    assert.equal(res.status, 200, `EVI turn failed with ${res.status}`);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+    const events = (await res.text()).split("\n\n").map((e) => e.trim()).filter(Boolean);
+    assert.equal(events.at(-1), "data: [DONE]", "the stream must end with [DONE] or EVI never ends the turn");
+    const chunks = events.slice(0, -1).map((e) => JSON.parse(e.slice("data: ".length)) as {
+      object: string; system_fingerprint: string; choices: Array<{ delta: { content?: string }; finish_reason: string | null }>;
+    });
+    assert.ok(
+      chunks.every((c) => c.object === "chat.completion.chunk" && c.system_fingerprint === sessionId),
+      "every chunk must be OpenAI-shaped and carry the session id back to EVI",
+    );
+    assert.equal(chunks.at(-1)?.choices[0]?.finish_reason, "stop", "the last chunk must finish the turn");
+    const spoken = chunks.map((c) => c.choices[0]?.delta.content ?? "").join("").trim();
+    assert.ok(spoken.length > 0, "EVI was handed an empty reply");
+    ok(`streams an OpenAI-format reply EVI can speak (${chunks.length} chunks)`);
+
+    // Persistence finishes just after the stream closes.
+    let turns: Array<{ content_text?: string; role: string }> = [];
+    for (let i = 0; i < 12 && turns.length < 2; i++) {
+      await sleep(500);
+      turns = await ConversationTurn.find({ session_id: new Types.ObjectId(sessionId) }).sort({ created_at: 1 }).lean();
+    }
+    assert.equal(turns.length, 2, `expected exactly one exchange persisted, found ${turns.length} turns — EVI's resent history must not be stored again`);
+    assert.equal(turns[0]?.content_text, LATEST, "the persisted user turn must be the latest message, not the history");
+    ok("only the new message is stored, not the history EVI resends");
+
+    await Session.updateOne({ _id: sessionId }, { $set: { status: "completed" } });
+    assert.equal((await post(token, sessionId, body)).status, 409, "an ended call kept answering");
+    ok("an ended call stops answering");
+  } finally {
+    await ConversationTurn.deleteMany({ session_id: { $in: [new Types.ObjectId(sessionId), new Types.ObjectId(other)] } });
+    await Session.deleteMany({ _id: { $in: [sessionId, other] } });
+  }
+}
+
+/**
  * The stateful half of the outreach policy.
  *
  * check:outreach covers the pure quiet-hours logic offline. These are the
@@ -1163,12 +1360,24 @@ async function runOutreachChecks(userId: string, characterId: string): Promise<v
   const charObjId = new Types.ObjectId(characterId);
   const now = Date.now();
 
+  // The sweep reads the real clock, so a user pinned to UTC was inside quiet
+  // hours (22:00-08:00) whenever smoke ran overnight UTC: the check-in never
+  // fired and "exactly one" failed. Pick the zone where it is mid-afternoon
+  // now instead. Etc/GMT signs are inverted: Etc/GMT-5 is UTC+5.
+  const offset = 14 - new Date(now).getUTCHours(); // always within -9..+14
+  const timezone = offset === 0 ? "Etc/GMT" : `Etc/GMT${offset > 0 ? "-" : "+"}${Math.abs(offset)}`;
+  assert.equal(
+    isQuietHours(timezone, new Date(now)),
+    false,
+    `${timezone} is inside quiet hours — every send assertion below would test nothing`,
+  );
+
   // Re-runnable: clear anything a previous run left, or user A would still be
   // inside their crisis window and every assertion below would shift.
   const reset = async (): Promise<void> => {
     await FollowUp.deleteMany({ user_id: userId });
     await ConversationTurn.deleteMany({ user_id: userId, "safety_flags.is_crisis": true });
-    await User.updateOne({ _id: userId }, { $set: { push_token: null, timezone: "UTC" } });
+    await User.updateOne({ _id: userId }, { $set: { push_token: null, timezone } });
   };
   await reset();
 

@@ -1,4 +1,4 @@
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import { RoomAgentDispatch, RoomConfiguration } from "@livekit/protocol";
 import { env } from "../config/env.js";
 
@@ -56,4 +56,10 @@ export async function generateRoomToken(params: RoomTokenParams): Promise<RoomTo
     livekit_url: env.LIVEKIT_URL,
     room_name: params.roomName,
   };
+}
+
+/** Ends a call for everyone in it, so the app sees it end rather than an empty room. */
+export async function deleteRoom(roomName: string): Promise<void> {
+  const host = env.LIVEKIT_URL.replace(/^ws/, "http");
+  await new RoomServiceClient(host, env.LIVEKIT_API_KEY, env.LIVEKIT_API_SECRET).deleteRoom(roomName);
 }

@@ -25,6 +25,11 @@ export const env = {
   LIVEKIT_URL: process.env["LIVEKIT_URL"] ?? "",
   DEEPGRAM_API_KEY: process.env["DEEPGRAM_API_KEY"] ?? "",
   HUME_API_KEY: process.env["HUME_API_KEY"] ?? "",
+  // EVI only. The secret mints short-lived client access tokens so the app never
+  // holds the API key; the config id names the EVI config whose language model
+  // is our /api/v1/voice/clm endpoint.
+  HUME_SECRET_KEY: process.env["HUME_SECRET_KEY"] ?? "",
+  HUME_EVI_CONFIG_ID: process.env["HUME_EVI_CONFIG_ID"] ?? "",
   // Auth — comma-separated, because a native app has a different OAuth client
   // id per platform and all of them are valid audiences for the same account.
   GOOGLE_CLIENT_IDS: process.env["GOOGLE_CLIENT_IDS"] ?? "",
@@ -37,6 +42,8 @@ export const env = {
   LLM_BASE_URL: process.env["LLM_BASE_URL"] ?? "",
   LLM_MODEL: process.env["LLM_MODEL"] ?? "",
   LLM_API_KEY: process.env["LLM_API_KEY"] ?? "",
+  // Proxies in front of the API whose X-Forwarded-For to trust (see app.ts).
+  TRUST_PROXY: process.env["TRUST_PROXY"] ?? "",
   RESEND_API_KEY: process.env["RESEND_API_KEY"] ?? "",
   EMAIL_FROM: process.env["EMAIL_FROM"] ?? "Evarna <noreply@evarna.app>",
 } as const;

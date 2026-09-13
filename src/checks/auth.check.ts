@@ -19,7 +19,7 @@ import { SignJWT } from "jose";
 // Dynamic, not static: ESM evaluates every static import before the module body
 // runs, so a top-level `import` of anything that reads config/env.js would blow
 // up on the missing vars this file just set above.
-const { issueSessionToken, verifySessionToken, assertEmailDeliverable } = await import(
+const { issueSessionToken, verifySessionToken, assertEmailDeliverable, issueClmToken, verifyClmToken } = await import(
   "../services/auth.service.js"
 );
 const { ageInYears, isMinorNow, isUnderMinimumAge, MIN_AGE_YEARS } = await import("../utils/age.js");
@@ -178,6 +178,37 @@ async function main(): Promise<void> {
     console.error(`    expected: ${JSON.stringify(expected)}`);
     console.error(`    actual:   ${JSON.stringify(actual)}`);
   }
+
+  const { SELF_AUTHENTICATED_ROUTES_FOR_TEST } = await import("../middleware/auth.js");
+  // Same reasoning as the allowlist: the hook skips these, so each one is a
+  // handler that must verify for itself.
+  check(
+    "self-authenticated routes are exactly the EVI model endpoint",
+    JSON.stringify([...SELF_AUTHENTICATED_ROUTES_FOR_TEST]) === JSON.stringify(["/api/v1/voice/clm/chat/completions"]),
+  );
+
+  console.log("\nVoice-model (EVI) tokens");
+  const SESSION = "68b000000000000000000001";
+  const clm = await issueClmToken(USER, SESSION, 3);
+  const clmClaims = await verifyClmToken(clm);
+  check("carries the user, the one session it is for, and the token version",
+    clmClaims.userId === USER && clmClaims.sessionId === SESSION && clmClaims.tokenVersion === 3);
+  // The token travels through Hume. If it also worked as an app token, a leak
+  // there would be a full account takeover.
+  await rejects("an EVI token is refused as an app session token", () => verifySessionToken(clm));
+  await rejects("an app session token is refused by the EVI endpoint", () => verifyClmToken(token));
+  await rejects("an EVI token with no session is refused", async () =>
+    verifyClmToken(
+      await new SignJWT({ v: 3 }).setProtectedHeader({ alg: "HS256" }).setSubject(USER)
+        .setIssuer("evarna").setAudience("evarna-clm").setExpirationTime("1h").sign(secret),
+    ),
+  );
+  await rejects("an expired EVI token is refused", async () =>
+    verifyClmToken(
+      await new SignJWT({ v: 3, sid: SESSION }).setProtectedHeader({ alg: "HS256" }).setSubject(USER)
+        .setIssuer("evarna").setAudience("evarna-clm").setIssuedAt(1).setExpirationTime(2).sign(secret),
+    ),
+  );
 
   console.log("\nEmail code delivery");
 

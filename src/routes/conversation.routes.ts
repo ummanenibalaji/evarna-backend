@@ -8,6 +8,7 @@ import { canStart, refuse } from "../services/entitlement.service.js";
 import { notifyUnreadReply } from "../services/outreach.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
+import { assertCanSendMessage } from "../services/usage.service.js";
 
 // Neither user_id nor character_id come from the client any more: the user is
 // the token holder, and the character is whatever the session already points
@@ -47,12 +48,18 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     }
     const character_id = session.character_id.toString();
 
-    // The entitlement gate, before reply.hijack() and not a line later. Once
-    // the response is hijacked a refusal can only be an SSE event, and the
-    // app's stream reader turns any of those into a generic "couldn't reach the
-    // server" bubble — so the cap would look like a bug rather than a limit.
+    // Both before reply.hijack() and not a line later: once the response is
+    // hijacked a refusal can only be an SSE event, and the app's stream reader
+    // turns any of those into a generic "couldn't reach the server" bubble — so
+    // a limit would read as a bug.
+    //
+    // Two checks, two jobs. `canStart` is the plan: what this tier is allowed
+    // per day, answered with a code the app turns into the cap card.
+    // `assertCanSendMessage` is the abuse ceiling underneath it: a burst per
+    // minute no human types, which entitlements have no opinion about.
     const gate = await canStart(user_id, "text");
     if (!gate.allowed) return refuse(reply, gate);
+    await assertCanSendMessage(user_id);
 
     // Take ownership of the raw response for SSE
     reply.hijack();

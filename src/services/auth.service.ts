@@ -4,6 +4,7 @@ import { User } from "../models/user.model.js";
 import { getRedis } from "../config/redis.js";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
+import { withinLimit } from "../utils/rate-limit.js";
 import type { AuthProvider, IUser } from "../types/user.types.js";
 import type { Types } from "mongoose";
 
@@ -46,6 +47,47 @@ export async function verifySessionToken(token: string): Promise<SessionClaims> 
   });
   if (!payload.sub) throw new Error("token has no subject");
   return { userId: payload.sub, tokenVersion: Number(payload["v"] ?? 0) };
+}
+
+// ── Voice-model tokens (Hume EVI custom language model) ──────────────────────
+//
+// EVI calls our /chat/completions with whatever key the app put in
+// session_settings.language_model_api_key, so this token passes through Hume.
+// It is therefore NOT the 30-day app token — a leak there would hand over the
+// account. It names one voice session, expires with the call, and carries its
+// own audience so neither token is accepted where the other belongs.
+//
+// ponytail: 2h hard cap per call. A longer call gets a 401 mid-conversation;
+// if that happens in practice, have the app re-issue and resend session_settings.
+
+const CLM_TTL = "2h";
+
+export interface ClmClaims {
+  userId: string;
+  sessionId: string;
+  tokenVersion: number;
+}
+
+export async function issueClmToken(userId: string, sessionId: string, tokenVersion: number): Promise<string> {
+  return new SignJWT({ v: tokenVersion, sid: sessionId })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(userId)
+    .setIssuedAt()
+    .setIssuer("evarna")
+    .setAudience("evarna-clm")
+    .setExpirationTime(CLM_TTL)
+    .sign(secretKey());
+}
+
+export async function verifyClmToken(token: string): Promise<ClmClaims> {
+  const { payload } = await jwtVerify(token, secretKey(), {
+    issuer: "evarna",
+    audience: "evarna-clm",
+    algorithms: ["HS256"],
+  });
+  const sid = payload["sid"];
+  if (!payload.sub || typeof sid !== "string") throw new Error("token has no subject or session");
+  return { userId: payload.sub, sessionId: sid, tokenVersion: Number(payload["v"] ?? 0) };
 }
 
 // ── Provider identity tokens ─────────────────────────────────────────────────
@@ -224,13 +266,7 @@ export class RateLimitedError extends Error {
 }
 
 async function bump(key: string, limit: number): Promise<boolean> {
-  const redis = getRedis();
-  const count = await redis.incr(key);
-  // Only the first increment sets the expiry, so the window is fixed from the
-  // first request rather than sliding forward on every hit — which would let a
-  // steady trickle keep the key alive forever.
-  if (count === 1) await redis.expire(key, RATE_WINDOW_SECONDS);
-  return count <= limit;
+  return withinLimit(key, limit, RATE_WINDOW_SECONDS);
 }
 
 export interface EmailCodeResult {

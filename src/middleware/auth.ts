@@ -33,10 +33,19 @@ const PUBLIC_ROUTES = new Set<string>([
   "/api/v1/voice/voices",
 ]);
 
+// Routes that carry their own credential instead of an app session token. The
+// hook lets them through and the handler MUST verify before doing anything
+// else. Today that is only the EVI custom-language-model endpoint, which Hume —
+// not the app — calls, with a token scoped to a single voice session.
+const SELF_AUTHENTICATED_ROUTES = new Set<string>([
+  "/api/v1/voice/clm/chat/completions",
+]);
+export const SELF_AUTHENTICATED_ROUTES_FOR_TEST: ReadonlySet<string> = SELF_AUTHENTICATED_ROUTES;
+
 /** Exposed so checks/auth.check.ts can pin the allowlist contents. */
 export const PUBLIC_ROUTES_FOR_TEST: ReadonlySet<string> = PUBLIC_ROUTES;
 
-function bearerToken(request: FastifyRequest): string | null {
+export function bearerToken(request: FastifyRequest): string | null {
   const header = request.headers.authorization;
   if (!header?.startsWith("Bearer ")) return null;
   const token = header.slice(7).trim();
@@ -49,7 +58,7 @@ export function registerAuth(app: FastifyInstance): void {
   app.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
     // routerPath is undefined for 404s; fall back to the raw url without query.
     const path = request.url.split("?")[0] ?? "";
-    if (PUBLIC_ROUTES.has(path)) return;
+    if (PUBLIC_ROUTES.has(path) || SELF_AUTHENTICATED_ROUTES.has(path)) return;
 
     const token = bearerToken(request);
     if (!token) {

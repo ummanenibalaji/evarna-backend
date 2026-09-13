@@ -19,7 +19,8 @@ process.env["OPENAI_API_KEY"] ??= "unused";
 // Dynamic: ESM evaluates every static import before the module body, which
 // would read config/env.js before the defaults above are set.
 const { buildApp } = await import("../app.js");
-const { PUBLIC_ROUTES_FOR_TEST } = await import("../middleware/auth.js");
+const { PUBLIC_ROUTES_FOR_TEST, SELF_AUTHENTICATED_ROUTES_FOR_TEST } = await import("../middleware/auth.js");
+const { issueSessionToken } = await import("../services/auth.service.js");
 
 interface RouteRow { method: string; url: string }
 
@@ -91,6 +92,60 @@ for (const row of protectedRoutes.slice(0, 3)) {
     fail(`${row.method} ${row.url} accepted a forged token`, `got ${res.statusCode}, expected 401`);
   } else {
     pass(`${row.method} ${row.url} rejects a forged token`);
+  }
+}
+
+// Behind a load balancer, request.ip must be the user, or the per-IP limit on
+// sign-in codes is one limit for the whole app. With no proxy configured it must
+// ignore X-Forwarded-For, or anyone can forge their way past that limit.
+console.log("\nClient IP behind a proxy");
+{
+  const { parseTrustProxy } = await import("../app.js");
+  const { default: Fastify } = await import("fastify");
+  const ipFor = async (setting: string): Promise<string> => {
+    const probe = Fastify({ trustProxy: parseTrustProxy(setting) });
+    probe.get("/ip", async (req) => req.ip);
+    const res = await probe.inject({ method: "GET", url: "/ip", headers: { "x-forwarded-for": "203.0.113.9" } });
+    await probe.close();
+    return res.body;
+  };
+  const trusted = await ipFor("1");
+  trusted === "203.0.113.9"
+    ? pass("TRUST_PROXY=1 uses the forwarded client address")
+    : fail("TRUST_PROXY=1 uses the forwarded client address", `got ${trusted}`);
+  const direct = await ipFor("");
+  direct !== "203.0.113.9"
+    ? pass("unset TRUST_PROXY ignores a client-supplied X-Forwarded-For")
+    : fail("unset TRUST_PROXY ignores a client-supplied X-Forwarded-For", "a forged header was trusted");
+  // A hop count parses to a function, not a number: Fastify's numeric mode
+  // trusts nothing, so a number here silently did nothing at all.
+  const hops = parseTrustProxy("2");
+  const shape = [parseTrustProxy("false"), parseTrustProxy("true"), typeof hops, parseTrustProxy("10.0.0.0/8")];
+  JSON.stringify(shape) === JSON.stringify([false, true, "function", "10.0.0.0/8"])
+    ? pass("TRUST_PROXY parses booleans, hop counts and address ranges")
+    : fail("TRUST_PROXY parses booleans, hop counts and address ranges", JSON.stringify(shape));
+  typeof hops === "function" && hops("10.0.0.1", 0) && hops("10.0.0.2", 1) && !hops("10.0.0.3", 2)
+    ? pass("TRUST_PROXY=2 trusts exactly two hops")
+    : fail("TRUST_PROXY=2 trusts exactly two hops", "the hop function does not stop at the second proxy");
+}
+
+// The hook skips these, so the handler is the only thing standing between the
+// internet and the conversation pipeline. It must refuse an app session token:
+// that token is valid everywhere else, and the voice-model token travels
+// through a third party.
+console.log("\nSelf-authenticated routes accept only their own token");
+const appToken = await issueSessionToken("000000000000000000000000", 0);
+for (const url of SELF_AUTHENTICATED_ROUTES_FOR_TEST) {
+  const row = routes.find((r) => r.url === url);
+  if (!row) {
+    fail(`${url} is self-authenticated`, "but no such route is registered");
+    continue;
+  }
+  const res = await app.inject({ method: row.method as "POST", url, headers: { authorization: `Bearer ${appToken}` }, payload: {} });
+  if (res.statusCode !== 401) {
+    fail(`${row.method} ${url} accepted an app session token`, `got ${res.statusCode}, expected 401`);
+  } else {
+    pass(`${row.method} ${url} refuses an app session token`);
   }
 }
 

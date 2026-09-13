@@ -554,3 +554,22 @@ Queue: `whisper-memory` · Retries: 3 × exponential backoff · Concurrency: 2
 - **Barge-in is VAD-based** — short noises or breaths can sometimes false-trigger barge-in. Confirm-then-barge-in pattern is a planned future fix.
 - **Webhook signature verification** — `POST /voice/webhook` may fail signature verification because Fastify 5 strips raw bodies. The in-worker `ParticipantDisconnected` handler is the primary session-end path; webhook is fallback only.
 - **Voice IDs hardcoded** — `src/data/voices.ts` references specific Hume voice UUIDs. Forks need to design their own voices and update both `voices.ts` and `archetypes.ts`.
+
+## Deploying
+
+One Docker image runs both processes:
+
+```bash
+docker build -t evarna-backend .
+docker run --env-file .env -p 3000:3000 evarna-backend                              # API
+docker run --env-file .env evarna-backend node dist/workers/voice.worker.js start   # voice worker
+```
+
+Production needs:
+
+- `NODE_ENV=production`, which makes the server refuse to start without `RESEND_API_KEY` or the Atlas vector index.
+- `TRUST_PROXY` set to match your load balancer (see `.env.example`).
+- A managed Redis with `maxmemory-policy noeviction`. BullMQ loses jobs under any eviction policy.
+- `GET /health` as the health check. It returns 503 unless MongoDB and Redis are reachable, and during shutdown.
+- A stop timeout of at least 30s. On SIGTERM the API finishes in-flight replies and the current memory job, and the voice worker lets live calls finish.
+
