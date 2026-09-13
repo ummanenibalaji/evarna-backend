@@ -1,7 +1,7 @@
 {
   "name": "evarna-backend",
   "version": "1.0.0",
-  "description": "Whisper AI companion backend \u2014 Phase 1",
+  "description": "Whisper AI companion backend — Phase 1",
   "type": "module",
   "scripts": {
     "dev": "nodemon --exec tsx src/server.ts",
@@ -20,6 +20,7 @@
     "check:entitlement": "tsx src/checks/entitlement.check.ts",
     "check:voice-latency": "tsx src/checks/voice-latency.check.ts",
     "check:voice-tts-ownership": "tsx src/checks/voice-tts-ownership.check.ts",
+    "check:sentry": "tsx src/checks/sentry.check.ts",
     "smoke": "tsx src/checks/smoke.ts",
     "setup:db": "tsx src/scripts/setup-db.ts",
     "purge:studio-memories": "tsx src/scripts/purge-studio-memories.ts",
@@ -35,6 +36,7 @@
     "@livekit/agents-plugin-openai": "^1.4.4",
     "@livekit/agents-plugin-silero": "^1.4.4",
     "@livekit/rtc-node": "^0.13.29",
+    "@sentry/node": "^10.74.0",
     "@types/ws": "^8.18.1",
     "bullmq": "^5",
     "dotenv": "^16",

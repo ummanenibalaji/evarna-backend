@@ -5,6 +5,7 @@ import { connectDatabase, checkVectorSearchIndex, disconnectDatabase } from "./c
 import { connectRedis, disconnectRedis } from "./config/redis.js";
 import { assertEmailDeliverable } from "./services/auth.service.js";
 import { logger } from "./utils/logger.js";
+import { flushSentry, initSentry } from "./config/sentry.js";
 import { startMemoryWorker } from "./workers/memory.worker.js";
 import { startStaleSessionCleanup } from "./services/stale-session.service.js";
 import { closeMemoryQueue, scheduleOutreachSweep } from "./queues/memory.queue.js";
@@ -13,6 +14,7 @@ import { closeMemoryQueue, scheduleOutreachSweep } from "./queues/memory.queue.j
 const SHUTDOWN_GRACE_MS = 25_000;
 
 async function start(): Promise<void> {
+  initSentry();
   // Before anything else: a production server that cannot deliver a sign-in
   // code cannot sign anyone in, and that used to surface only as users
   // mysteriously never receiving one.
@@ -56,6 +58,7 @@ async function start(): Promise<void> {
       await closeMemoryQueue();
       await disconnectRedis();
       await disconnectDatabase();
+      await flushSentry();
       logger.info("shutdown: clean");
       process.exit(0);
     } catch (err) {
@@ -69,5 +72,5 @@ async function start(): Promise<void> {
 
 start().catch((err) => {
   logger.error({ err }, "Failed to start server");
-  process.exit(1);
+  void flushSentry().finally(() => process.exit(1));
 });

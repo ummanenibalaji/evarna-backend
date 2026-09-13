@@ -44,6 +44,8 @@ export const env = {
   LLM_API_KEY: process.env["LLM_API_KEY"] ?? "",
   // Proxies in front of the API whose X-Forwarded-For to trust (see app.ts).
   TRUST_PROXY: process.env["TRUST_PROXY"] ?? "",
+  // Crash reporting. Unset = nothing is sent (see config/sentry.ts).
+  SENTRY_DSN: process.env["SENTRY_DSN"] ?? "",
   RESEND_API_KEY: process.env["RESEND_API_KEY"] ?? "",
   EMAIL_FROM: process.env["EMAIL_FROM"] ?? "Evarna <noreply@evarna.app>",
 } as const;

@@ -7,9 +7,12 @@ import { env } from "../config/env.js";
 import { runVoicePipeline } from "../services/voice.service.js";
 import { VOICE_AGENT_NAME } from "../services/livekit-token.service.js";
 import { logger } from "../utils/logger.js";
+import { initSentry } from "../config/sentry.js";
 
 export default defineAgent({
   prewarm: async (_proc: JobProcess) => {
+    // Each job runs in its own process, so each one initialises its own client.
+    initSentry();
     // One-time setup per worker process: connect to MongoDB + Redis
     await connectDatabase();
     await connectRedis();
@@ -27,6 +30,7 @@ export default defineAgent({
 });
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  initSentry();
   if (!env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET || !env.LIVEKIT_URL) {
     logger.error(
       "LiveKit credentials missing — set LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL"

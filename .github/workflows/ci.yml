@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Typecheck, build, offline checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
+      # No database, Redis or API keys needed: each check sets its own
+      # placeholders, and none of them spends money. `npm run smoke` is not here
+      # because it needs Atlas, Redis and a real OpenAI key.
+      - name: Offline checks
+        run: |
+          for check in prompt auth routes studio outreach adaptation activity voice-tts-ownership entitlement sentry; do
+            echo "::group::check:$check"
+            npm run check:$check
+            echo "::endgroup::"
+          done
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t evarna-backend:ci .
