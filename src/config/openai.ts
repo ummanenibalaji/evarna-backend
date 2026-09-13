@@ -57,9 +57,23 @@ export function getConversationModel(): string {
   return env.LLM_MODEL || MODELS.CONVERSATION;
 }
 
+/**
+ * GPT-5.x reasons by default, and reasoning tokens count against
+ * max_completion_tokens. Measured on this key: at "low", 13-17 of a 150-token
+ * voice reply went on thinking and first token went from ~1.0s to 1.9s. At
+ * "none" it used 0 reasoning tokens with first token on par with gpt-4o-mini,
+ * and it is the only effort at which `temperature` is accepted.
+ *
+ * gpt-4o-mini rejects the field outright, so it is sent only to GPT-5 models —
+ * otherwise rolling back via LLM_MODEL would fail every reply.
+ */
+export function conversationReasoningEffort(): "none" | undefined {
+  return !isLocalConversationModel() && getConversationModel().startsWith("gpt-5") ? "none" : undefined;
+}
+
 // Model constants per PRD
 export const MODELS = {
-  CONVERSATION: "gpt-4o-mini",
+  CONVERSATION: "gpt-5.5",
   SUMMARIZATION: "gpt-4o-mini",
   EMBEDDING: "text-embedding-3-small",
 } as const;

@@ -19,7 +19,8 @@ process.env["OPENAI_API_KEY"] ??= "unused";
 // Dynamic: ESM evaluates every static import before the module body, which
 // would read config/env.js before the defaults above are set.
 const { buildApp } = await import("../app.js");
-const { PUBLIC_ROUTES_FOR_TEST } = await import("../middleware/auth.js");
+const { PUBLIC_ROUTES_FOR_TEST, SELF_AUTHENTICATED_ROUTES_FOR_TEST } = await import("../middleware/auth.js");
+const { issueSessionToken } = await import("../services/auth.service.js");
 
 interface RouteRow { method: string; url: string }
 
@@ -91,6 +92,26 @@ for (const row of protectedRoutes.slice(0, 3)) {
     fail(`${row.method} ${row.url} accepted a forged token`, `got ${res.statusCode}, expected 401`);
   } else {
     pass(`${row.method} ${row.url} rejects a forged token`);
+  }
+}
+
+// The hook skips these, so the handler is the only thing standing between the
+// internet and the conversation pipeline. It must refuse an app session token:
+// that token is valid everywhere else, and the voice-model token travels
+// through a third party.
+console.log("\nSelf-authenticated routes accept only their own token");
+const appToken = await issueSessionToken("000000000000000000000000", 0);
+for (const url of SELF_AUTHENTICATED_ROUTES_FOR_TEST) {
+  const row = routes.find((r) => r.url === url);
+  if (!row) {
+    fail(`${url} is self-authenticated`, "but no such route is registered");
+    continue;
+  }
+  const res = await app.inject({ method: row.method as "POST", url, headers: { authorization: `Bearer ${appToken}` }, payload: {} });
+  if (res.statusCode !== 401) {
+    fail(`${row.method} ${url} accepted an app session token`, `got ${res.statusCode}, expected 401`);
+  } else {
+    pass(`${row.method} ${url} refuses an app session token`);
   }
 }
 

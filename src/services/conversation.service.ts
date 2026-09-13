@@ -1,5 +1,5 @@
 import { Types } from "mongoose";
-import { getOpenAI, getConversationClient, getConversationModel, MODELS } from "../config/openai.js";
+import { getOpenAI, getConversationClient, getConversationModel, conversationReasoningEffort, MODELS } from "../config/openai.js";
 import { Character } from "../models/character.model.js";
 import { User } from "../models/user.model.js";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
@@ -31,6 +31,12 @@ export interface ConversationParams {
   characterId: string;
   userId: string;
   message: string;
+  /**
+   * Tone-of-voice scores for this message, when the transport measures them
+   * (Hume EVI does; LiveKit + Deepgram does not). Untrusted shape — it arrives
+   * over the network — so describeProsody() takes only finite numbers from it.
+   */
+  prosody?: Record<string, unknown> | null;
   /**
    * Set by the voice pipeline (voice-llm.service.ts). Switches the prompt's
    * response-length guidance to speakable replies — no markdown, no lists,
@@ -307,7 +313,7 @@ async function persistCrisisExchange(
 export async function* streamConversation(
   params: ConversationParams
 ): AsyncGenerator<ConversationEvent> {
-  const { sessionId, characterId, userId, message, isVoiceMode = false } = params;
+  const { sessionId, characterId, userId, message, isVoiceMode = false, prosody = null } = params;
 
   const EMPTY_CTX: IRedisSessionContext = {
     compressed_summary: "",
@@ -438,6 +444,7 @@ export async function* streamConversation(
     memoryBlock || null,
     usageSummaryText,
     personalization,
+    prosody,
   );
 
   // 5. Stream from LLM (temperature 0.8 for consistent persona)
@@ -450,12 +457,17 @@ export async function* streamConversation(
   let fullContent = "";
   let outputTokens = 0;
 
+  const reasoningEffort = conversationReasoningEffort();
+
   try {
     const stream = await openai.chat.completions.create({
       model: getConversationModel(),
       messages,
       stream: true,
       temperature: 0.8,
+      // ponytail: openai@4.104 types ReasoningEffort as low|medium|high, but the
+      // API accepts "none" (verified live). Drop the cast on the next SDK upgrade.
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort as unknown as "low" } : {}),
       // V-07: 600 tokens is ~40 seconds of unstoppable speech that we pay Hume
       // for. The prompt asks for one to three sentences but nothing enforced
       // it. On a call the cap IS the enforcement.

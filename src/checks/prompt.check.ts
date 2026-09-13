@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { ARCHETYPES, getArchetypeConfig } from "../data/archetypes.js";
-import { assemblePrompt, buildPersonaBlock, buildIdentityBlock } from "../services/prompt.service.js";
+import { assemblePrompt, buildPersonaBlock, buildIdentityBlock, describeProsody, HONESTY_BLOCK } from "../services/prompt.service.js";
 import type { Archetype } from "../types/character.types.js";
 import type { IRedisSessionContext } from "../types/prompt.types.js";
 
@@ -155,7 +155,81 @@ function checkCompanionKnowsItself(): void {
   console.log("✓ the companion is told its own name and how long it has known the user");
 }
 
+/**
+ * The anti-sycophancy rule must reach the model for every character, in every
+ * mode, with or without personalization. Measured before it existed: told "I
+ * didn't prepare, but it's their fault", gpt-4o-mini praised the excuse.
+ */
+function checkHonestyIsAlwaysSent(): void {
+  const personalization = {
+    name: "Test",
+    gender: "female" as const,
+    communicationStyle: "warm" as const,
+    personalitySliders: { warmth: 50, humor: 50, directness: 50, energy: 50, formality: 50 },
+  };
+  const identities = [
+    IDENTITY,
+    { ...IDENTITY, mode: "studio", studio: { kind: "scenario" as const, scenarioName: "Interview Coach" } },
+    { ...IDENTITY, mode: "studio", studio: { kind: "custom" as const } },
+  ];
+
+  let cases = 0;
+  for (const name of Object.keys(ARCHETYPES) as Archetype[]) {
+    const persona = getArchetypeConfig(name).persona_config;
+    for (const identity of identities) {
+      for (const p of [null, { ...personalization, isVoiceMode: false }, { ...personalization, isVoiceMode: true }]) {
+        const { messages } = assemblePrompt(persona, identity, EMPTY_CTX, "hi", null, null, p);
+        const at = messages.findIndex((m) => m.role === "system" && m.content === HONESTY_BLOCK);
+        assert.ok(at >= 0, `${name}/${identity.mode}/${p ? "personalized" : "bare"}: honesty block missing`);
+        if (p) {
+          const personalAt = messages.findIndex((m) => m.content.includes("[Your personality for this person]"));
+          assert.ok(at > personalAt, `${name}: honesty must follow the personality it defers to for delivery`);
+        }
+        cases++;
+      }
+    }
+  }
+
+  // Gutting the block to a heading would still pass the presence check above.
+  for (const essential of [
+    "not the same as agreeing",
+    "Do not praise what does not deserve it",
+    "change your mind when they give you a reason",
+    "Do not invent disagreement",
+  ]) {
+    assert.ok(HONESTY_BLOCK.includes(essential), `honesty block lost "${essential}"`);
+  }
+  console.log(`✓ the honesty rule reaches the model in all ${cases} archetype × mode × personalization cases`);
+}
+
+function checkProsodyDescription(): void {
+  assert.equal(describeProsody(null), null, "no scores → nothing");
+  assert.equal(describeProsody({}), null, "empty scores → nothing");
+  assert.equal(describeProsody({ Calmness: 0.05, Joy: 0.1 }), null, "only faint signals → nothing, not noise");
+
+  const text = describeProsody({ Tiredness: 0.62, Sadness: 0.35, Joy: 0.21, Calmness: 0.05, Bogus: "0.9", Nan: Number.NaN });
+  assert.ok(text, "clear signals must be described");
+  assert.ok(text.indexOf("tiredness (strongly)") < text.indexOf("sadness (clearly)"), "strongest first, in words");
+  assert.ok(!text.includes("joy"), "a signal under half the strongest is noise and must be dropped");
+  assert.ok(!text.includes("calmness"), "a signal under the floor must be dropped");
+  assert.ok(!text.includes("bogus"), "non-numeric scores from the network must be ignored");
+  assert.ok(!/\d/.test(text), "numbers must never reach the model — it would read them out");
+
+  const many = Object.fromEntries(["A", "B", "C", "D", "E"].map((k) => [k, 0.5]));
+  assert.equal((describeProsody(many)!.match(/strongly/g) ?? []).length, 3, "at most three signals");
+
+  const persona = getArchetypeConfig("partner").persona_config;
+  const plain = assemblePrompt(persona, IDENTITY, EMPTY_CTX, "i'm fine");
+  const toned = assemblePrompt(persona, IDENTITY, EMPTY_CTX, "i'm fine", null, null, null, { Sadness: 0.7 });
+  assert.equal(toned.messages.length, plain.messages.length + 1, "tone adds exactly one message");
+  assert.ok(toned.messages.at(-2)!.content.includes("sadness"), "tone must sit directly before the message it describes");
+  assert.equal(toned.messages.at(-1)!.content, "i'm fine");
+  console.log("✓ tone of voice is described in words, only when clear, next to the message it belongs to");
+}
+
 checkPersonaBlockCarriesEveryRule();
+checkHonestyIsAlwaysSent();
+checkProsodyDescription();
 checkCompanionKnowsItself();
 checkAssemblePromptShipsThePersona();
 checkMinorRestrictions();

@@ -42,6 +42,9 @@ import { Character } from "../models/character.model.js";
 import { User } from "../models/user.model.js";
 import { Memory } from "../models/memory.model.js";
 import { isQuietHours, runOutreachSweep } from "../services/outreach.service.js";
+import { Session } from "../models/session.model.js";
+import { issueClmToken } from "../services/auth.service.js";
+import { initSessionContext } from "../services/session-context.service.js";
 
 const BASE_URL = "http://localhost:3000";
 const API = `${BASE_URL}/api/v1`;
@@ -787,6 +790,10 @@ async function run(): Promise<void> {
   );
   ok("a brand-new account sees zeros, not a fabricated streak");
 
+  // ── 20 ────────────────────────────────────────────────────────────────────
+  step("20. the EVI voice-model endpoint answers only for its own call");
+  await runEviModelChecks(a.token, a.user_id, characterId);
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);
@@ -877,6 +884,96 @@ async function runUnreadReplyChecks(
   ok("the user is notified that the answer arrived");
 
   await User.updateOne({ _id: userId }, { $set: { push_token: null } });
+}
+
+/**
+ * Hume EVI calls this endpoint, not the app, and its token passes through a
+ * third party. What matters is that the token opens exactly one live call and
+ * nothing else — and that the reply still goes through the full pipeline.
+ *
+ * Tokens are minted directly because the start route needs a Hume EVI config,
+ * which a development machine will not have. Costs one conversation reply.
+ */
+async function runEviModelChecks(appToken: string, userId: string, characterId: string): Promise<void> {
+  const version = (await User.findById(userId).select("token_version").lean())?.token_version ?? 0;
+  const newCall = async (): Promise<string> => {
+    const session = await Session.create({
+      user_id: userId,
+      character_id: new Types.ObjectId(characterId),
+      session_type: "voice_call",
+      mode: "companion",
+      status: "active",
+      started_at: new Date(),
+    });
+    await initSessionContext(session._id.toString());
+    return session._id.toString();
+  };
+  const post = (token: string | null, sessionId: string, body: unknown): Promise<Response> =>
+    fetch(`${API}/voice/clm/chat/completions?custom_session_id=${sessionId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(body),
+    });
+
+  const sessionId = await newCall();
+  const other = await newCall();
+  const token = await issueClmToken(userId, sessionId, version);
+  const LATEST = "[smoke] honestly I'm fine, just tired";
+  // EVI resends the whole conversation every turn, with tone scores attached.
+  const body = {
+    messages: [
+      { role: "user", content: "[smoke] something from earlier in the call" },
+      { role: "assistant", content: "an earlier reply" },
+      { role: "user", content: LATEST, models: { prosody: { scores: { Tiredness: 0.7, Sadness: 0.4, Joy: 0.02 } } } },
+    ],
+  };
+
+  try {
+    assert.equal((await post(null, sessionId, body)).status, 401, "no token must be refused");
+    assert.equal((await post(appToken, sessionId, body)).status, 401, "the app's session token must not work on the voice-model endpoint");
+    ok("refuses no token, and refuses the app's own session token");
+
+    assert.equal((await post(token, other, body)).status, 403, "a token issued for one call was accepted for another");
+    ok("a token opens only the call it was issued for");
+
+    const stale = await issueClmToken(userId, sessionId, version + 1);
+    assert.equal((await post(stale, sessionId, body)).status, 401, "a token whose version does not match the account was accepted");
+    ok("signing out everywhere revokes voice-model tokens too");
+
+    const res = await post(token, sessionId, body);
+    assert.equal(res.status, 200, `EVI turn failed with ${res.status}`);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+    const events = (await res.text()).split("\n\n").map((e) => e.trim()).filter(Boolean);
+    assert.equal(events.at(-1), "data: [DONE]", "the stream must end with [DONE] or EVI never ends the turn");
+    const chunks = events.slice(0, -1).map((e) => JSON.parse(e.slice("data: ".length)) as {
+      object: string; system_fingerprint: string; choices: Array<{ delta: { content?: string }; finish_reason: string | null }>;
+    });
+    assert.ok(
+      chunks.every((c) => c.object === "chat.completion.chunk" && c.system_fingerprint === sessionId),
+      "every chunk must be OpenAI-shaped and carry the session id back to EVI",
+    );
+    assert.equal(chunks.at(-1)?.choices[0]?.finish_reason, "stop", "the last chunk must finish the turn");
+    const spoken = chunks.map((c) => c.choices[0]?.delta.content ?? "").join("").trim();
+    assert.ok(spoken.length > 0, "EVI was handed an empty reply");
+    ok(`streams an OpenAI-format reply EVI can speak (${chunks.length} chunks)`);
+
+    // Persistence finishes just after the stream closes.
+    let turns: Array<{ content_text?: string; role: string }> = [];
+    for (let i = 0; i < 12 && turns.length < 2; i++) {
+      await sleep(500);
+      turns = await ConversationTurn.find({ session_id: new Types.ObjectId(sessionId) }).sort({ created_at: 1 }).lean();
+    }
+    assert.equal(turns.length, 2, `expected exactly one exchange persisted, found ${turns.length} turns — EVI's resent history must not be stored again`);
+    assert.equal(turns[0]?.content_text, LATEST, "the persisted user turn must be the latest message, not the history");
+    ok("only the new message is stored, not the history EVI resends");
+
+    await Session.updateOne({ _id: sessionId }, { $set: { status: "completed" } });
+    assert.equal((await post(token, sessionId, body)).status, 409, "an ended call kept answering");
+    ok("an ended call stops answering");
+  } finally {
+    await ConversationTurn.deleteMany({ session_id: { $in: [new Types.ObjectId(sessionId), new Types.ObjectId(other)] } });
+    await Session.deleteMany({ _id: { $in: [sessionId, other] } });
+  }
 }
 
 /**

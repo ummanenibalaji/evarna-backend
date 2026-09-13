@@ -25,6 +25,11 @@ export const env = {
   LIVEKIT_URL: process.env["LIVEKIT_URL"] ?? "",
   DEEPGRAM_API_KEY: process.env["DEEPGRAM_API_KEY"] ?? "",
   HUME_API_KEY: process.env["HUME_API_KEY"] ?? "",
+  // EVI only. The secret mints short-lived client access tokens so the app never
+  // holds the API key; the config id names the EVI config whose language model
+  // is our /api/v1/voice/clm endpoint.
+  HUME_SECRET_KEY: process.env["HUME_SECRET_KEY"] ?? "",
+  HUME_EVI_CONFIG_ID: process.env["HUME_EVI_CONFIG_ID"] ?? "",
   // Auth — comma-separated, because a native app has a different OAuth client
   // id per platform and all of them are valid audiences for the same account.
   GOOGLE_CLIENT_IDS: process.env["GOOGLE_CLIENT_IDS"] ?? "",
