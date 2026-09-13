@@ -41,7 +41,7 @@ import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { Character } from "../models/character.model.js";
 import { User } from "../models/user.model.js";
 import { Memory } from "../models/memory.model.js";
-import { runOutreachSweep } from "../services/outreach.service.js";
+import { isQuietHours, runOutreachSweep } from "../services/outreach.service.js";
 
 const BASE_URL = "http://localhost:3000";
 const API = `${BASE_URL}/api/v1`;
@@ -896,12 +896,24 @@ async function runOutreachChecks(userId: string, characterId: string): Promise<v
   const charObjId = new Types.ObjectId(characterId);
   const now = Date.now();
 
+  // The sweep reads the real clock, so a user pinned to UTC was inside quiet
+  // hours (22:00-08:00) whenever smoke ran overnight UTC: the check-in never
+  // fired and "exactly one" failed. Pick the zone where it is mid-afternoon
+  // now instead. Etc/GMT signs are inverted: Etc/GMT-5 is UTC+5.
+  const offset = 14 - new Date(now).getUTCHours(); // always within -9..+14
+  const timezone = offset === 0 ? "Etc/GMT" : `Etc/GMT${offset > 0 ? "-" : "+"}${Math.abs(offset)}`;
+  assert.equal(
+    isQuietHours(timezone, new Date(now)),
+    false,
+    `${timezone} is inside quiet hours — every send assertion below would test nothing`,
+  );
+
   // Re-runnable: clear anything a previous run left, or user A would still be
   // inside their crisis window and every assertion below would shift.
   const reset = async (): Promise<void> => {
     await FollowUp.deleteMany({ user_id: userId });
     await ConversationTurn.deleteMany({ user_id: userId, "safety_flags.is_crisis": true });
-    await User.updateOne({ _id: userId }, { $set: { push_token: null, timezone: "UTC" } });
+    await User.updateOne({ _id: userId }, { $set: { push_token: null, timezone } });
   };
   await reset();
 
