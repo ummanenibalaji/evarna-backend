@@ -7,6 +7,7 @@ import { findOwnedSession } from "../services/account.service.js";
 import { notifyUnreadReply } from "../services/outreach.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
+import { assertCanSendMessage } from "../services/usage.service.js";
 
 // Neither user_id nor character_id come from the client any more: the user is
 // the token holder, and the character is whatever the session already points
@@ -45,6 +46,9 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ success: false, error: "Session not found" });
     }
     const character_id = session.character_id.toString();
+
+    // Before the hijack, so a refusal is a JSON 429 rather than a broken stream.
+    await assertCanSendMessage(user_id);
 
     // Take ownership of the raw response for SSE
     reply.hijack();

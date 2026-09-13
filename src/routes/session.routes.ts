@@ -8,6 +8,7 @@ import { endSessionById } from "../services/session.service.js";
 import { findOwnedCharacter, findOwnedSession } from "../services/account.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
+import { assertCanStartSession } from "../services/usage.service.js";
 
 // No user_id: the owner is whoever holds the token.
 const StartBodySchema = z.object({
@@ -40,6 +41,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
     const { character_id, session_type, remember } = parsed.data;
     const user_id = getUserId(request);
+    await assertCanStartSession(user_id);
 
     // You cannot start a session against someone else's companion. Without
     // this the character_id was an unchecked parameter that would have written

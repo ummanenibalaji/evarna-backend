@@ -95,6 +95,34 @@ for (const row of protectedRoutes.slice(0, 3)) {
   }
 }
 
+// Behind a load balancer, request.ip must be the user, or the per-IP limit on
+// sign-in codes is one limit for the whole app. With no proxy configured it must
+// ignore X-Forwarded-For, or anyone can forge their way past that limit.
+console.log("\nClient IP behind a proxy");
+{
+  const { parseTrustProxy } = await import("../app.js");
+  const { default: Fastify } = await import("fastify");
+  const ipFor = async (setting: string): Promise<string> => {
+    const probe = Fastify({ trustProxy: parseTrustProxy(setting) });
+    probe.get("/ip", async (req) => req.ip);
+    const res = await probe.inject({ method: "GET", url: "/ip", headers: { "x-forwarded-for": "203.0.113.9" } });
+    await probe.close();
+    return res.body;
+  };
+  const trusted = await ipFor("1");
+  trusted === "203.0.113.9"
+    ? pass("TRUST_PROXY=1 uses the forwarded client address")
+    : fail("TRUST_PROXY=1 uses the forwarded client address", `got ${trusted}`);
+  const direct = await ipFor("");
+  direct !== "203.0.113.9"
+    ? pass("unset TRUST_PROXY ignores a client-supplied X-Forwarded-For")
+    : fail("unset TRUST_PROXY ignores a client-supplied X-Forwarded-For", "a forged header was trusted");
+  const parsed = [parseTrustProxy("false"), parseTrustProxy("true"), parseTrustProxy("2"), parseTrustProxy("10.0.0.0/8")];
+  JSON.stringify(parsed) === JSON.stringify([false, true, 2, "10.0.0.0/8"])
+    ? pass("TRUST_PROXY parses booleans, hop counts and address ranges")
+    : fail("TRUST_PROXY parses booleans, hop counts and address ranges", JSON.stringify(parsed));
+}
+
 // The hook skips these, so the handler is the only thing standing between the
 // internet and the conversation pipeline. It must refuse an app session token:
 // that token is valid everywhere else, and the voice-model token travels

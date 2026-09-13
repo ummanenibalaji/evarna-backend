@@ -45,6 +45,7 @@ import { isQuietHours, runOutreachSweep } from "../services/outreach.service.js"
 import { Session } from "../models/session.model.js";
 import { issueClmToken } from "../services/auth.service.js";
 import { initSessionContext } from "../services/session-context.service.js";
+import { USAGE_LIMITS, VOICE_LIMIT_LINE } from "../services/usage.service.js";
 
 const BASE_URL = "http://localhost:3000";
 const API = `${BASE_URL}/api/v1`;
@@ -794,6 +795,10 @@ async function run(): Promise<void> {
   step("20. the EVI voice-model endpoint answers only for its own call");
   await runEviModelChecks(a.token, a.user_id, characterId);
 
+  // ── 21 ────────────────────────────────────────────────────────────────────
+  step("21. usage ceilings are enforced by the server, not the app");
+  await runUsageLimitChecks(a.token, a.user_id, characterId, reborn.token, reborn.user_id);
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);
@@ -884,6 +889,99 @@ async function runUnreadReplyChecks(
   ok("the user is notified that the answer arrived");
 
   await User.updateOne({ _id: userId }, { $set: { push_token: null } });
+}
+
+/**
+ * Before these, a signed-in script could run unlimited replies and calls on our
+ * bill. Counters and usage are preset directly rather than hit hundreds of
+ * times, so this section makes no model calls.
+ */
+async function runUsageLimitChecks(
+  aToken: string, aUserId: string, characterId: string, otherToken: string, otherUserId: string,
+): Promise<void> {
+  // Messages: refused as plain JSON before the stream starts, with nothing stored.
+  const started = await api<{ session_id: string }>("POST", "/sessions/start", aToken, {
+    character_id: characterId, session_type: "text",
+  });
+  const sessionId = started.json.data!.session_id;
+  const dayKey = `usage:msg:day:${aUserId}`;
+  await getRedis().set(dayKey, String(USAGE_LIMITS.messagesPerDay), "EX", 120);
+  try {
+    const res = await fetch(`${API}/conversations/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${aToken}` },
+      body: JSON.stringify({ session_id: sessionId, message: "[smoke] one over the limit" }),
+    });
+    assert.equal(res.status, 429, "a message over the daily ceiling was accepted");
+    const body = (await res.json()) as { code?: string; limit?: string; error?: string };
+    assert.equal(body.code, "USAGE_LIMIT_REACHED");
+    assert.equal(body.limit, "messages_per_day");
+    assert.ok(body.error && !/\d{3}/.test(body.error), "the refusal must carry a message the app can show");
+    const turns = await ConversationTurn.countDocuments({ session_id: new Types.ObjectId(sessionId) });
+    assert.equal(turns, 0, "a refused message was still stored");
+    ok("the daily message ceiling is enforced before any model call");
+  } finally {
+    await getRedis().del(dayKey);
+  }
+
+  // Companions: filler rows up to the cap, then one more is refused.
+  const filler = await Character.collection.insertMany(
+    Array.from({ length: USAGE_LIMITS.companions }, () => ({
+      user_id: otherUserId, mode: "companion", is_active: true, name: "[smoke] cap filler",
+    })),
+  );
+  try {
+    const over = await api("POST", "/characters/create", otherToken, {
+      archetype: "mentor", gender: "female", voice_id: "any", name: "One too many",
+    });
+    assert.equal(over.status, 403, "a companion over the cap was created");
+    assert.equal(over.json.code, "COMPANION_LIMIT_REACHED");
+    ok(`a user cannot create more than ${USAGE_LIMITS.companions} companions`);
+  } finally {
+    await Character.deleteMany({ _id: { $in: Object.values(filler.insertedIds) } });
+  }
+
+  // Calls: concurrent calls, then daily minutes, then the EVI path mid-call.
+  const fakeCharacter = new Types.ObjectId();
+  const call = (fields: Record<string, unknown>) => ({
+    user_id: otherUserId, character_id: fakeCharacter, session_type: "voice_call", mode: "companion",
+    status: "active", started_at: new Date(), ...fields,
+  });
+  const startCall = () => api("POST", "/voice/sessions/start", otherToken, { character_id: fakeCharacter.toString() });
+  try {
+    await Session.insertMany(Array.from({ length: USAGE_LIMITS.concurrentCalls }, () => call({})));
+    const busy = await startCall();
+    assert.equal(busy.status, 429, "a call over the concurrent limit was started");
+    assert.equal((busy.json as { limit?: string }).limit, "concurrent_calls");
+    ok("parallel calls are capped");
+
+    await Session.deleteMany({ user_id: otherUserId, character_id: fakeCharacter });
+    await Session.create(call({
+      status: "completed", started_at: new Date(Date.now() - 3_600_000), ended_at: new Date(),
+      duration_seconds: USAGE_LIMITS.voiceMinutesPerDay * 60,
+    }));
+    const spent = await startCall();
+    assert.equal(spent.status, 429, "a call was started with no voice minutes left");
+    assert.equal((spent.json as { limit?: string }).limit, "voice_minutes_per_day");
+    ok("a call cannot start once the day's minutes are used");
+
+    const live = await Session.create(call({}));
+    const version = (await User.findById(otherUserId).select("token_version").lean())?.token_version ?? 0;
+    const token = await issueClmToken(otherUserId, live._id.toString(), version);
+    const evi = await fetch(`${API}/voice/clm/chat/completions?custom_session_id=${live._id.toString()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ messages: [{ role: "user", content: "[smoke] are you still there?" }] }),
+    });
+    assert.equal(evi.status, 200, "EVI must get a speakable response, not an error it reads as a crash");
+    const spoken = await evi.text();
+    assert.ok(spoken.includes(JSON.stringify(VOICE_LIMIT_LINE).slice(1, 20)), "the limit line was not spoken");
+    assert.ok(spoken.trim().endsWith("data: [DONE]"));
+    assert.equal(await ConversationTurn.countDocuments({ session_id: live._id }), 0, "a reply was generated past the limit");
+    ok("a call that runs out of minutes is told so, and nothing more is generated");
+  } finally {
+    await Session.deleteMany({ user_id: otherUserId, character_id: fakeCharacter });
+  }
 }
 
 /**

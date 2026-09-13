@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "nodemon --exec tsx src/server.ts",
     "voice-worker": "tsx src/workers/voice.worker.ts dev",
-    "voice-worker:prod": "tsx src/workers/voice.worker.ts start",
+    "voice-worker:prod": "node dist/workers/voice.worker.js start",
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",

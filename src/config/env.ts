@@ -42,6 +42,8 @@ export const env = {
   LLM_BASE_URL: process.env["LLM_BASE_URL"] ?? "",
   LLM_MODEL: process.env["LLM_MODEL"] ?? "",
   LLM_API_KEY: process.env["LLM_API_KEY"] ?? "",
+  // Proxies in front of the API whose X-Forwarded-For to trust (see app.ts).
+  TRUST_PROXY: process.env["TRUST_PROXY"] ?? "",
   RESEND_API_KEY: process.env["RESEND_API_KEY"] ?? "",
   EMAIL_FROM: process.env["EMAIL_FROM"] ?? "Evarna <noreply@evarna.app>",
 } as const;

@@ -13,6 +13,7 @@ import { streamConversation } from "../services/conversation.service.js";
 import { User } from "../models/user.model.js";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
+import { assertCanStartCall, voiceSecondsRemaining, VOICE_LIMIT_LINE } from "../services/usage.service.js";
 
 // No user_id: the owner is whoever holds the token.
 const StartVoiceSessionSchema = z.object({
@@ -91,6 +92,7 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const user_id = getUserId(request);
+    await assertCanStartCall(user_id);
     const started = await createVoiceSession(user_id, parsed.data.character_id);
     if (!started.ok) return reply.status(started.status).send({ success: false, error: started.error });
     const { sessionId } = started;
@@ -135,6 +137,7 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ success: false, error: parsed.error.errors[0]?.message ?? "Invalid input" });
     }
     const user_id = getUserId(request);
+    await assertCanStartCall(user_id);
 
     // Before creating the session, so a misconfigured server does not leave an
     // orphaned "active" call behind for every attempt.
@@ -217,6 +220,10 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(409).send({ success: false, error: "This call has ended", code: "SESSION_ENDED" });
     }
 
+    // Checked every turn: EVI has no call timer of ours, so this is where a call
+    // that runs past the day's minutes ends. Nothing is generated or stored.
+    const outOfMinutes = (await voiceSecondsRemaining(claims.userId)) <= 0;
+
     reply.hijack();
     const res = reply.raw;
     res.writeHead(200, {
@@ -230,6 +237,14 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     let gone = false;
     res.on("close", () => { gone = true; });
     const send = (chunk: string) => { if (!gone) res.write(chunk); };
+
+    if (outOfMinutes) {
+      send(clmChunk(claims.sessionId, VOICE_LIMIT_LINE));
+      send(clmChunk(claims.sessionId, null, "stop"));
+      send("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
 
     let spoke = false;
     try {

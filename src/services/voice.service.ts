@@ -16,6 +16,8 @@ import { CompanionLLM } from "./voice-llm.service.js";
 import { VoiceTurnTimer } from "./voice-metrics.service.js";
 import { primeMemoryPrefetch, clearMemoryPrefetch } from "./memory-prefetch.service.js";
 import { endSessionById } from "./session.service.js";
+import { voiceSecondsRemaining, VOICE_LIMIT_LINE } from "./usage.service.js";
+import { deleteRoom } from "./livekit-token.service.js";
 
 // Turn-taking tuning. Env-overridable so the numbers can be swept during a
 // latency run without a redeploy; the defaults are the shipped values.
@@ -237,6 +239,9 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
     }
   });
 
+  // Declared before the handlers below so a disconnect can always clear it.
+  let limitTimer: NodeJS.Timeout | undefined;
+
   await session.start({ agent, room: ctx.room });
 
   // End the Mongo session as soon as the caller leaves. Without this a voice
@@ -252,6 +257,7 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   });
 
   ctx.room.on(RoomEvent.Disconnected, () => {
+    clearTimeout(limitTimer);
     logger.info({ roomName }, "voice: room disconnected — ending session");
     void endSessionById(roomName, "completed").catch((err) =>
       logger.error({ err, roomName }, "voice: failed to end session on room disconnect"),
@@ -268,6 +274,20 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   // none), so the call used to open with dead silence and a stuck
   // "thinking" state.
   session.say(greeting);
+
+  // Daily voice minutes, enforced mid-call. The start route refuses a call with
+  // nothing left; this ends one that runs past the allowance.
+  if (ids) {
+    const remainingMs = (await voiceSecondsRemaining(ids.userId)) * 1000;
+    limitTimer = setTimeout(() => {
+      session.say(VOICE_LIMIT_LINE);
+      // ponytail: fixed 8s for the goodbye to play; await the speech handle's
+      // playout instead if it ever gets cut off.
+      setTimeout(() => {
+        void deleteRoom(roomName).catch((err) => logger.error({ err, roomName }, "voice: could not end call at limit"));
+      }, 8_000);
+    }, remainingMs);
+  }
 
   logger.info(
     { roomName, voiceId, ttsProvider: env.HUME_API_KEY ? "hume" : "openai-fallback" },

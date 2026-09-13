@@ -4,6 +4,7 @@ import { User } from "../models/user.model.js";
 import { getRedis } from "../config/redis.js";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
+import { withinLimit } from "../utils/rate-limit.js";
 import type { AuthProvider, IUser } from "../types/user.types.js";
 import type { Types } from "mongoose";
 
@@ -265,13 +266,7 @@ export class RateLimitedError extends Error {
 }
 
 async function bump(key: string, limit: number): Promise<boolean> {
-  const redis = getRedis();
-  const count = await redis.incr(key);
-  // Only the first increment sets the expiry, so the window is fixed from the
-  // first request rather than sliding forward on every hit — which would let a
-  // steady trickle keep the key alive forever.
-  if (count === 1) await redis.expire(key, RATE_WINDOW_SECONDS);
-  return count <= limit;
+  return withinLimit(key, limit, RATE_WINDOW_SECONDS);
 }
 
 export interface EmailCodeResult {

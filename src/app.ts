@@ -4,6 +4,9 @@ import cors from "@fastify/cors";
 import { getVectorIndexStatus } from "./config/database.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { registerAuth } from "./middleware/auth.js";
+import mongoose from "mongoose";
+import { env } from "./config/env.js";
+import { getRedis } from "./config/redis.js";
 import { authRoutes } from "./routes/auth.routes.js";
 import { userRoutes } from "./routes/user.routes.js";
 import { characterRoutes } from "./routes/character.routes.js";
@@ -37,8 +40,27 @@ export interface BuildAppOptions {
   onRoute?: (route: { method: string; url: string }) => void;
 }
 
+/**
+ * How many proxies in front of us to trust for the client's address.
+ *
+ * Behind a load balancer every request arrives from the balancer, so without
+ * this `request.ip` is the same for every user, and the per-IP limit on sign-in
+ * codes becomes one limit shared by the whole app. Trusting it when there is NO
+ * proxy is just as wrong: X-Forwarded-For is then written by the client, and
+ * anyone can dodge the limit by setting it. So it is explicit per deployment:
+ *   TRUST_PROXY=1            one hop (a typical load balancer or PaaS router)
+ *   TRUST_PROXY=10.0.0.0/8   only proxies in this range
+ *   unset                    direct connections (local development)
+ */
+export function parseTrustProxy(raw: string): boolean | number | string {
+  const v = raw.trim();
+  if (!v || v === "false") return false;
+  if (v === "true") return true;
+  return /^\d+$/.test(v) ? Number(v) : v;
+}
+
 export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, trustProxy: parseTrustProxy(env.TRUST_PROXY) });
 
   if (opts.onRoute) {
     const report = opts.onRoute;
@@ -59,11 +81,28 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   // vector_index is reported here because a missing index disables long-term
   // memory with no other visible symptom. "ready" is the only value that means
   // memory recall actually works.
-  app.get("/health", async () => ({
-    status: "ok",
-    ts: new Date().toISOString(),
-    vector_index: getVectorIndexStatus(),
-  }));
+  //
+  // 503 unless MongoDB and Redis are both reachable, so a load balancer stops
+  // sending traffic to an instance that can only fail. During shutdown Fastify
+  // itself answers 503, which drains the instance the same way.
+  app.get("/health", async (_request, reply) => {
+    const mongo = mongoose.connection.readyState === 1;
+    const redisClient = getRedis();
+    const redis =
+      redisClient.status === "ready" &&
+      (await Promise.race([
+        redisClient.ping().then((r) => r === "PONG", () => false),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000)),
+      ]));
+    const healthy = mongo && redis;
+    return reply.status(healthy ? 200 : 503).send({
+      status: healthy ? "ok" : "degraded",
+      ts: new Date().toISOString(),
+      mongo,
+      redis,
+      vector_index: getVectorIndexStatus(),
+    });
+  });
 
   await app.register(authRoutes, { prefix: "/api/v1/auth" });
   await app.register(userRoutes, { prefix: "/api/v1/users" });
