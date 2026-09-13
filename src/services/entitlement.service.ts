@@ -357,23 +357,12 @@ export function decide(
   if (snap.degraded) return allow;
 
   if (kind === "voice") {
-    // Two live calls is a runaway client, not a person. One is left alone
-    // deliberately: a dropped call stays `active` for up to half an hour, and
-    // refusing on that would stop someone re-dialling after their train went
-    // into a tunnel. The in-flight seconds counted in the snapshot are what
-    // actually stop concurrent calls from being free.
-    if (snap.live_voice_sessions >= 2) {
-      return {
-        allowed: false,
-        code: "CALL_IN_PROGRESS",
-        status: 409,
-        error: "You're already on a call. End it before starting another.",
-        tier: snap.tier,
-        voice_seconds_remaining,
-        renews_at: snap.period.end.toISOString(),
-      };
-    }
-
+    // Concurrency is deliberately NOT decided here. No tier sells "two calls at
+    // once", so it is an abuse ceiling rather than a plan limit, and
+    // usage.service.ts owns it — deciding it in both places meant two queries
+    // and two different codes for one rule. What this snapshot still does is
+    // count a live call's seconds as they run (see aggregateVoiceUsage), which
+    // is what stops simultaneous calls from being free.
     if (voice_seconds_remaining <= 0) {
       return {
         allowed: false,

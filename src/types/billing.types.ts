@@ -120,7 +120,10 @@ export interface EntitlementSnapshot {
   voice_seconds_used: number;
   /** Of which, seconds attributed to calls that are still connected. */
   voice_seconds_in_flight: number;
-  /** Live voice sessions right now. Two or more is a runaway client. */
+  /**
+   * Live voice sessions right now. Reported rather than decided on: the
+   * concurrency ceiling lives in usage.service.ts.
+   */
   live_voice_sessions: number;
   topup_seconds: number;
   messages_used_today: number;
@@ -136,7 +139,12 @@ export interface EntitlementSnapshot {
 
 export type StartKind = "voice" | "text";
 
-export type RefusalCode = "VOICE_MINUTES_EXHAUSTED" | "DAILY_MESSAGE_CAP" | "CALL_IN_PROGRESS";
+/**
+ * Concurrency is not here on purpose: "two calls at once" is not something a
+ * tier sells, so usage.service.ts owns that ceiling and answers it with
+ * USAGE_LIMIT_REACHED.
+ */
+export type RefusalCode = "VOICE_MINUTES_EXHAUSTED" | "DAILY_MESSAGE_CAP";
 
 export interface CanStartAllowed {
   allowed: true;
@@ -149,7 +157,7 @@ export interface CanStartRefused {
   allowed: false;
   code: RefusalCode;
   /** The route sends this verbatim. 402 is the one the app turns into a paywall. */
-  status: 402 | 409 | 429;
+  status: 402 | 429;
   error: string;
   tier: Tier;
   voice_seconds_remaining: number;

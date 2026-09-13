@@ -240,14 +240,10 @@ async function main(): Promise<void> {
   );
   check("a paid tier is nowhere near the free cap", decide(snapshot({ tier: "plus", messages_used_today: 100 }), "text").allowed);
 
-  // One live session is left alone on purpose: a dropped call stays `active`
-  // for up to half an hour, and refusing would stop someone re-dialling.
+  // Concurrency is usage.service.ts's ceiling, not a plan limit, and deciding
+  // it in both places gave one rule two codes. The gate must stay out of it.
   check("one live call does not block starting one", decide(snapshot({ live_voice_sessions: 1 }), "voice").allowed);
-  const concurrent = decide(snapshot({ live_voice_sessions: 2 }), "voice");
-  check(
-    "two live calls is 409 CALL_IN_PROGRESS",
-    !concurrent.allowed && concurrent.code === "CALL_IN_PROGRESS" && concurrent.status === 409,
-  );
+  check("the gate does not decide concurrency", decide(snapshot({ live_voice_sessions: 5 }), "voice").allowed);
 
   // Fail open. The alternative turns a slow database into a product-wide outage.
   check("unreadable usage allows a call", decide(snapshot({ degraded: true, voice_seconds_used: 99_999 }), "voice").allowed);

@@ -689,7 +689,10 @@ async function run(): Promise<void> {
   // Belt and braces: prove the attempts above changed nothing.
   const aStill = await api<{ name: string }>("GET", `/characters/${characterId}`, a.token);
   assert.equal(aStill.status, 200, "user A's character disappeared during the isolation tests");
-  assert.equal(aStill.json.data!.name, renamed, "user B managed to rename user A's character");
+  // Compared against the name section 11 left in place, not the timestamp it
+  // renamed through — that rename is now undone so no account is left carrying
+  // a test name.
+  assert.equal(aStill.json.data!.name, "Maya", "user B managed to rename user A's character");
   const aMemories = await api<Array<unknown>>("GET", `/memories/${characterId}`, a.token);
   assert.ok(aMemories.json.data!.length > 0, "user B managed to wipe user A's memories");
   ok("A's data is intact after every attempt by B");
