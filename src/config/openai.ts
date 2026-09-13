@@ -73,7 +73,13 @@ export function conversationReasoningEffort(): "none" | undefined {
 
 // Model constants per PRD
 export const MODELS = {
-  CONVERSATION: "gpt-5.5",
+  // gpt-5.6-luna: compared with gpt-5.5, gpt-5.6-terra, gpt-5.4-mini and
+  // gpt-4o-mini on the real companion prompt (grief, "I'm fine", a bad plan, an
+  // unfair accusation). Close to 5.5 on all four, with first token matching
+  // gpt-4o-mini (~690ms median), at $0.20/$1.20 per 1M tokens vs 5.5's $5/$30.
+  // gpt-5.4-mini was as fast but joked through grief. Set LLM_MODEL=gpt-5.5 to
+  // use the stronger model, e.g. for a paid tier.
+  CONVERSATION: "gpt-5.6-luna",
   SUMMARIZATION: "gpt-4o-mini",
   EMBEDDING: "text-embedding-3-small",
 } as const;
