@@ -881,7 +881,7 @@ async function runEntitlementChecks(
   // 400-minute tier and a renewal date of "June 1, 2026" for everyone.
   const fresh = await entitlement();
   assert.equal(fresh.tier, "free", `a never-purchased account reports "${fresh.tier}"`);
-  assert.equal(fresh.voice.allowance_seconds, 480, "the free voice allowance is not 8 minutes");
+  assert.equal(fresh.voice.allowance_seconds, 900, "the free voice allowance is not 15 minutes");
   assert.equal(fresh.text.daily_cap, 100, "the free message cap is not 100/day");
   assert.ok(new Date(fresh.period.renews_at).getTime() > Date.now(), "the period has already ended");
   assert.ok(fresh.plans.length >= 2 && fresh.topup_packs.length >= 3, "the response carries no catalog");
@@ -903,22 +903,22 @@ async function runEntitlementChecks(
     // ten-minute call, so the signup date is moved back for this section and
     // restored in the teardown.
     await User.updateOne({ _id: userId }, { $set: { created_at: new Date(now - 3 * 3_600_000) } });
-    // Ten minutes of calls against an eight-minute allowance. Written directly:
-    // talking for ten minutes would cost about eighty-five cents of TTS.
+    // Twenty minutes of calls against a fifteen-minute allowance. Written
+    // directly: talking for twenty minutes would cost about $1.70 of TTS.
     const spent = await Session.create({
       user_id: userId,
       character_id: new Types.ObjectId(characterId),
       session_type: "voice_call",
       mode: "companion",
       status: "completed",
-      started_at: new Date(now - 600_000),
+      started_at: new Date(now - 1_200_000),
       ended_at: new Date(now),
-      duration_seconds: 600,
+      duration_seconds: 1_200,
     });
     created.sessions.push(spent._id);
 
     const overspent = await entitlement();
-    assert.ok(overspent.voice.used_seconds - baseline >= 600, `used_seconds is ${overspent.voice.used_seconds}, expected at least 600`);
+    assert.ok(overspent.voice.used_seconds - baseline >= 1_200, `used_seconds is ${overspent.voice.used_seconds}, expected at least 1200`);
     assert.equal(overspent.voice.remaining_seconds, 0, "an overspent balance must clamp to zero, never go negative");
     ok("a completed call is counted against the period allowance");
 

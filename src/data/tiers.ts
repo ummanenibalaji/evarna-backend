@@ -14,8 +14,10 @@
 import type { BillingPlan, Tier, TierAllowance, TopUpPack } from "../types/billing.types.js";
 
 export const TIERS: Record<Tier, TierAllowance> = {
-  // 8 minutes. Enough to feel what a call is like, not enough to live on.
-  free: { voice_seconds: 8 * 60, daily_messages: 100, label: "Free" },
+  // 15 minutes a month: two or three real calls, enough to decide whether
+  // talking to a companion is worth paying for. At about $0.085 a minute the
+  // most one free user can cost is about $1.28 a month. (Was 8, about one call.)
+  free: { voice_seconds: 15 * 60, daily_messages: 100, label: "Free" },
   // 120 minutes. The pricing table flags a heavy Plus user as the one account
   // that can cost more than the store pays us, which is why the gate exists.
   plus: { voice_seconds: 120 * 60, daily_messages: 1_000, label: "Plus" },

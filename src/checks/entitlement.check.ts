@@ -175,7 +175,7 @@ async function main(): Promise<void> {
   console.log("\nThe numbers the owner decided");
   // Pinned, like the public-route allowlist: these are money, and a silent edit
   // should fail a check rather than ship.
-  check("free is 8 minutes a month", TIERS.free.voice_seconds === 480);
+  check("free is 15 minutes a month", TIERS.free.voice_seconds === 900);
   check("plus is 120 minutes a month", TIERS.plus.voice_seconds === 7_200);
   check("premium is 400 minutes a month", TIERS.premium.voice_seconds === 24_000);
   check("free is capped at 100 messages a day", TIERS.free.daily_messages === 100);
@@ -190,8 +190,8 @@ async function main(): Promise<void> {
   check("every product id is namespaced", [...PLANS.flatMap((x) => [x.product_ids.monthly, x.product_ids.annual]), ...TOPUP_PACKS.map((x) => x.product_id)].every((id) => id.startsWith("evarna.")));
 
   console.log("\nRemaining balance");
-  check("a fresh free account has 8 minutes", remainingVoiceSeconds({ tier: "free", topup_seconds: 0, voice_seconds_used: 0 }) === 480);
-  check("usage comes off the allowance", remainingVoiceSeconds({ tier: "free", topup_seconds: 0, voice_seconds_used: 200 }) === 280);
+  check("a fresh free account has 15 minutes", remainingVoiceSeconds({ tier: "free", topup_seconds: 0, voice_seconds_used: 0 }) === 900);
+  check("usage comes off the allowance", remainingVoiceSeconds({ tier: "free", topup_seconds: 0, voice_seconds_used: 200 }) === 700);
   // Never negative: the app divides by the allowance to draw a meter, and a
   // negative balance rendered as a bar going the wrong way.
   check("an overspent balance clamps at zero", remainingVoiceSeconds({ tier: "free", topup_seconds: 0, voice_seconds_used: 9_999 }) === 0);
@@ -200,11 +200,11 @@ async function main(): Promise<void> {
   // re-granted every month — one $4.99 pack becoming an unlimited
   // subscription. It becomes spendable with the usage counters, and this
   // assertion is what should fail when someone makes it so without them.
-  check("a top-up balance does not extend the allowance yet", remainingVoiceSeconds({ tier: "free", topup_seconds: 1_800, voice_seconds_used: 0 }) === 480);
-  check("an exhausted allowance is not rescued by the wallet", remainingVoiceSeconds({ tier: "free", topup_seconds: 1_800, voice_seconds_used: 480 }) === 0);
+  check("a top-up balance does not extend the allowance yet", remainingVoiceSeconds({ tier: "free", topup_seconds: 1_800, voice_seconds_used: 0 }) === 900);
+  check("an exhausted allowance is not rescued by the wallet", remainingVoiceSeconds({ tier: "free", topup_seconds: 1_800, voice_seconds_used: 900 }) === 0);
   // A tier from another build must not become an unpriced allowance, and above
   // all must not throw: this runs inside the gate, outside its try/catch.
-  check("an unknown tier is treated as free", remainingVoiceSeconds({ tier: "enterprise" as never, topup_seconds: 0, voice_seconds_used: 0 }) === 480);
+  check("an unknown tier is treated as free", remainingVoiceSeconds({ tier: "enterprise" as never, topup_seconds: 0, voice_seconds_used: 0 }) === 900);
   check("messages remaining clamps at zero too", remainingMessagesToday({ tier: "free", messages_used_today: 500 }) === 0);
 
   console.log("\nThe gate's answers");
@@ -214,7 +214,7 @@ async function main(): Promise<void> {
   // off that the user is entitled to start.
   check("one second of allowance is enough to start", decide(snapshot({ voice_seconds_used: 479 }), "voice").allowed);
 
-  const exhausted = decide(snapshot({ voice_seconds_used: 480 }), "voice");
+  const exhausted = decide(snapshot({ voice_seconds_used: 900 }), "voice");
   check(
     "an exhausted allowance is 402 VOICE_MINUTES_EXHAUSTED",
     !exhausted.allowed && exhausted.code === "VOICE_MINUTES_EXHAUSTED" && exhausted.status === 402,
@@ -223,7 +223,7 @@ async function main(): Promise<void> {
     "the refusal says when the allowance comes back",
     !exhausted.allowed && exhausted.renews_at === "2026-10-01T00:00:00.000Z",
   );
-  check("text still works with no voice minutes left", decide(snapshot({ voice_seconds_used: 480 }), "text").allowed);
+  check("text still works with no voice minutes left", decide(snapshot({ voice_seconds_used: 900 }), "text").allowed);
 
   const capped = decide(snapshot({ messages_used_today: 100 }), "text");
   check(
@@ -281,7 +281,7 @@ async function main(): Promise<void> {
   const viewSnap = snapshot({ tier: "plus", messages_reset_at: utc("2026-09-13T00:00:00.000Z") });
   check("the text block reports the real reset instant", toEntitlementView(viewSnap).text.resets_at === "2026-09-13T00:00:00.000Z");
   check("a top-up balance is reported even though it is not spendable", toEntitlementView(snapshot({ topup_seconds: 1_800 })).voice.topup_seconds === 1_800);
-  check("an unknown tier still renders a view rather than throwing", toEntitlementView(snapshot({ tier: "enterprise" as never })).voice.allowance_seconds === 480);
+  check("an unknown tier still renders a view rather than throwing", toEntitlementView(snapshot({ tier: "enterprise" as never })).voice.allowance_seconds === 900);
 
   console.log(
     failures === 0
