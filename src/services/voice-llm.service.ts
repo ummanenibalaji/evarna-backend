@@ -45,7 +45,7 @@ export class CompanionLLM extends llm.LLM {
   }
 
   label(): string {
-    return "whisper.companion-pipeline";
+    return "evarna.companion-pipeline";
   }
 
   override get model(): string {
@@ -55,7 +55,7 @@ export class CompanionLLM extends llm.LLM {
   }
 
   override get provider(): string {
-    return "whisper";
+    return "evarna";
   }
 
   chat({

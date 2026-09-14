@@ -6,7 +6,7 @@ import { Character } from "../models/character.model.js";
 import { initSessionContext } from "../services/session-context.service.js";
 import { generateRoomToken, LiveKitNotConfiguredError } from "../services/livekit-token.service.js";
 import { canStart, refuse } from "../services/entitlement.service.js";
-import { WHISPER_VOICES } from "../data/voices.js";
+import { EVARNA_VOICES } from "../data/voices.js";
 import { bearerToken, getUserId } from "../middleware/auth.js";
 import { issueClmToken, verifyClmToken } from "../services/auth.service.js";
 import { clmChunk, EviNotConfiguredError, getHumeAccessToken } from "../services/hume-evi.service.js";
@@ -79,7 +79,7 @@ async function createVoiceSession(user_id: string, character_id: string): Promis
 export async function voiceRoutes(app: FastifyInstance): Promise<void> {
   // GET /api/v1/voice/voices — public catalog for onboarding (S07) and settings
   app.get("/voices", async (_request, reply) => {
-    return reply.send({ success: true, data: WHISPER_VOICES });
+    return reply.send({ success: true, data: EVARNA_VOICES });
   });
 
   // POST /api/v1/voice/sessions/start

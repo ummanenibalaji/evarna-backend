@@ -2,7 +2,7 @@ import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import { RoomAgentDispatch, RoomConfiguration } from "@livekit/protocol";
 import { env } from "../config/env.js";
 
-export const VOICE_AGENT_NAME = "whisper-voice-agent";
+export const VOICE_AGENT_NAME = "evarna-voice-agent";
 
 export class LiveKitNotConfiguredError extends Error {
   constructor() {

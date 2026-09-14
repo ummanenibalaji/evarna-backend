@@ -6,7 +6,7 @@
  * `voice: { id, provider: "CUSTOM_VOICE" }`.
  */
 
-export interface WhisperVoice {
+export interface EvarnaVoice {
   id: string;
   name: string;
   gender: "male" | "female";
@@ -14,7 +14,7 @@ export interface WhisperVoice {
   previewText: string;
 }
 
-export const WHISPER_VOICES: WhisperVoice[] = [
+export const EVARNA_VOICES: EvarnaVoice[] = [
   {
     id: "944adf80-0d6e-4909-b6fa-078784d6f8c5",
     name: "Kai",
@@ -66,8 +66,8 @@ export function resolveHumeVoice(voiceId: string): { id: string; provider: "HUME
   return HUME_VOICE_MAP[voiceId] ?? { id: voiceId, provider: "CUSTOM_VOICE" };
 }
 
-export function getVoice(voiceId: string): WhisperVoice | undefined {
-  return WHISPER_VOICES.find((v) => v.id === voiceId);
+export function getVoice(voiceId: string): EvarnaVoice | undefined {
+  return EVARNA_VOICES.find((v) => v.id === voiceId);
 }
 
 /** Default voice when onboarding doesn't specify one. */

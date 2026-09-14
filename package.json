@@ -1,7 +1,7 @@
 {
   "name": "evarna-backend",
   "version": "1.0.0",
-  "description": "Whisper AI companion backend — Phase 1",
+  "description": "Evarna AI companion backend",
   "type": "module",
   "scripts": {
     "dev": "nodemon --exec tsx src/server.ts",
