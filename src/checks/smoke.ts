@@ -951,9 +951,11 @@ async function runEntitlementChecks(
       session_type: "voice_call",
       mode: "companion",
       status: "interrupted",
-      started_at: new Date(now - 2_400_000),
+      // 45 minutes, billing 15 after the idle window: exactly the free
+      // allowance, so the lapsed-subscriber check below still has nothing left.
+      started_at: new Date(now - 2_700_000),
       ended_at: new Date(now),
-      duration_seconds: 2_400,
+      duration_seconds: 2_700,
     });
     created.sessions.push(swept._id);
     const sweptView = await entitlement();
@@ -961,8 +963,8 @@ async function runEntitlementChecks(
     // started (section 10 leaves a real two-second call behind).
     assert.equal(
       sweptView.voice.used_seconds - baseline,
-      600,
-      `a 40-minute swept session billed ${sweptView.voice.used_seconds - baseline}s, expected 600 (2400 - 1800 idle)`,
+      900,
+      `a 45-minute swept session billed ${sweptView.voice.used_seconds - baseline}s, expected 900 (2700 - 1800 idle)`,
     );
     ok("a sweep-closed call bills its talk time, not its wall clock");
 
