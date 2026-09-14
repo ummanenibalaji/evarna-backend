@@ -1,5 +1,6 @@
 import { Session } from "../models/session.model.js";
 import { withinLimit } from "../utils/rate-limit.js";
+import { TIERS } from "../data/tiers.js";
 
 // ── Server-side usage ceilings ───────────────────────────────────────────────
 //
@@ -17,7 +18,13 @@ const intFromEnv = (name: string, fallback: number): number => {
 
 export const USAGE_LIMITS = {
   messagesPerMinute: intFromEnv("LIMIT_MESSAGES_PER_MINUTE", 20),
-  messagesPerDay: intFromEnv("LIMIT_MESSAGES_PER_DAY", 400),
+  // Derived, not a number: an abuse ceiling below a plan's own daily cap makes
+  // that plan unreachable (400 stopped Plus at 400 of its 1,000). Always sits
+  // 500 above the most generous plan, whatever the plans become.
+  messagesPerDay: intFromEnv(
+    "LIMIT_MESSAGES_PER_DAY",
+    Math.max(...Object.values(TIERS).map((t) => t.daily_messages)) + 500,
+  ),
   sessionStartsPerHour: intFromEnv("LIMIT_SESSION_STARTS_PER_HOUR", 60),
   voiceMinutesPerDay: intFromEnv("LIMIT_VOICE_MINUTES_PER_DAY", 60),
   // ponytail: 2, not 1, so a call that crashed without ending does not block

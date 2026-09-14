@@ -22,11 +22,22 @@ export async function endSessionById(
   const session = await Session.findById(sessionId);
   if (!session || session.status !== "active") return null;
 
-  const duration_seconds = Math.floor(
-    (endedAt.getTime() - session.started_at.getTime()) / 1000,
-  );
+  // `endedAt` can come from the client (POST /sessions/:id/end), and voice
+  // minutes are billed from the duration recorded here. Sending the session's
+  // own start time recorded 0 seconds, so an hour-long call cost nothing and
+  // could be repeated. A voice session therefore ends at the server's clock,
+  // always; a text session may say it ended earlier, but never before it began
+  // or after now.
+  const now = new Date();
+  const startedAt = session.started_at.getTime();
+  const end =
+    session.session_type === "text"
+      ? new Date(Math.min(now.getTime(), Math.max(startedAt, endedAt.getTime())))
+      : now;
 
-  session.ended_at = endedAt;
+  const duration_seconds = Math.floor((end.getTime() - startedAt) / 1000);
+
+  session.ended_at = end;
   session.duration_seconds = duration_seconds;
   session.status = status;
 

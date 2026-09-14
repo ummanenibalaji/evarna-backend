@@ -821,6 +821,11 @@ async function run(): Promise<void> {
   step("22. the entitlement gate (a regression here gives the product away)");
   await runEntitlementChecks(a.token, a.user_id, characterId);
 
+  // ── 22b ───────────────────────────────────────────────────────────────────
+  // Last on purpose: it writes a spent 20-minute call against account A.
+  step("22b. voice minutes cannot be backdated away, and calls do not spend the text cap");
+  await runBillingIntegrityChecks(a.token, a.user_id, characterId);
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);
@@ -1253,6 +1258,57 @@ async function runUsageLimitChecks(
     ok("a call that runs out of minutes is told so, and nothing more is generated");
   } finally {
     await Session.deleteMany({ user_id: otherUserId, character_id: fakeCharacter });
+  }
+}
+
+/**
+ * Two holes found reviewing the entitlement gate. Both are free to test: rows
+ * are written directly and every refusal or read happens before generation.
+ */
+async function runBillingIntegrityChecks(token: string, userId: string, characterId: string): Promise<void> {
+  const created: Types.ObjectId[] = [];
+  const character = new Types.ObjectId(characterId);
+  try {
+    // POST /sessions/:id/end took ended_at from the client, and billing reads
+    // the duration recorded there. Sending the start time recorded 0 seconds,
+    // so an hour-long call cost nothing, as often as anyone liked.
+    const startedAt = new Date(Date.now() - 20 * 60_000);
+    const call = await Session.create({
+      user_id: userId, character_id: character, session_type: "voice_call",
+      mode: "companion", status: "active", started_at: startedAt, memory_enabled: false,
+    });
+    created.push(call._id);
+    const ended = await api<{ duration_seconds: number }>("POST", `/sessions/${call._id.toString()}/end`, token, {
+      ended_at: startedAt.toISOString(),
+    });
+    assert.equal(ended.status, 200, `ending the call failed: ${JSON.stringify(ended.json)}`);
+    const recorded = ended.json.data!.duration_seconds;
+    assert.ok(recorded >= 20 * 60 - 5, `a 20-minute call ended at its own start time recorded ${recorded}s`);
+    ok(`a voice call cannot be backdated to bill nothing (recorded ${recorded}s)`);
+
+    // Both voice paths persist every spoken exchange as a user turn, and the
+    // daily TEXT cap counted every user turn, so a few calls spent it.
+    const usedToday = async (): Promise<number> => {
+      const res = await api<{ text: { used_today: number } }>("GET", "/billing/entitlement", token);
+      assert.equal(res.status, 200, `GET /billing/entitlement → ${res.status}`);
+      return res.json.data!.text.used_today;
+    };
+    const before = await usedToday();
+    const live = await Session.create({
+      user_id: userId, character_id: character, session_type: "voice_call",
+      mode: "companion", status: "active", started_at: new Date(), memory_enabled: false,
+    });
+    created.push(live._id);
+    await ConversationTurn.insertMany([1, 2, 3].map((i) => ({
+      session_id: live._id, character_id: character, user_id: userId,
+      role: "user", content_text: `[smoke] spoken turn ${i}`, created_at: new Date(),
+    })));
+    const after = await usedToday();
+    assert.equal(after, before, `three spoken turns moved today's text count from ${before} to ${after}`);
+    ok("turns spoken on a call do not use the daily message allowance");
+  } finally {
+    await ConversationTurn.deleteMany({ session_id: { $in: created } });
+    await Session.deleteMany({ _id: { $in: created } });
   }
 }
 

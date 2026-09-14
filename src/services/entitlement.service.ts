@@ -48,8 +48,9 @@ const READ_DEADLINE_MS = 2_000;
  * Ceiling on what ONE session can bill: the time that has actually elapsed
  * since it started.
  *
- * `/sessions/:id/end` takes `ended_at` from the client and uses it verbatim, so
- * a forged future timestamp can claim any duration at all. `started_at` is
+ * `endSessionById` now records voice sessions at the server's clock and clamps a
+ * client's `ended_at` for text, so a forged timestamp no longer reaches here.
+ * This bound stays as defence in depth for rows written before that. `started_at` is
  * server-set and the clock is ours, so elapsed time is a true upper bound on
  * how long anyone can have been talking — and unlike a flat ceiling it does not
  * hand out a free allowance to whoever stays on the longest call. A flat hour
@@ -461,11 +462,10 @@ async function aggregateVoiceUsage(
     ],
   };
 
-  // What a closed session bills, bounded on both sides because
-  // `/sessions/:id/end` takes `ended_at` from the client and uses it verbatim:
-  // a timestamp before the session started gives a negative duration, which
-  // would mint minutes through the sum, and one in the future would claim any
-  // duration at all.
+  // What a closed session bills, bounded on both sides. endSessionById no longer
+  // trusts a client `ended_at` for voice, but rows written before that fix may
+  // hold a negative duration (which would mint minutes through the sum) or one
+  // longer than the session could have lasted.
   const recordedSeconds = {
     $min: [elapsed, { $max: [0, { $ifNull: ["$duration_seconds", 0] }] }],
   };
@@ -562,11 +562,26 @@ export async function getEntitlementSnapshot(
       // role: "user" matters. The companion's own proactive messages are
       // persisted as assistant turns, and counting those would let outreach
       // spend the user's daily cap for them.
-      ConversationTurn.countDocuments({
+      //
+      // Voice turns are excluded. Both voice paths persist every spoken exchange
+      // as a user turn, so without this a few calls used up the TEXT allowance,
+      // and voice is already metered in minutes. Only sessions overlapping
+      // today can hold today's turns, which keeps the id list short.
+      Session.distinct("_id", {
         user_id: userId,
-        role: "user",
-        created_at: { $gte: day.start, $lt: day.end },
-      }).maxTimeMS(READ_DEADLINE_MS),
+        session_type: { $in: ["voice_call", "voice_note"] },
+        started_at: { $lt: day.end },
+        $or: [{ ended_at: null }, { ended_at: { $gte: day.start } }],
+      })
+        .maxTimeMS(READ_DEADLINE_MS)
+        .then((voiceSessionIds) =>
+          ConversationTurn.countDocuments({
+            user_id: userId,
+            role: "user",
+            created_at: { $gte: day.start, $lt: day.end },
+            session_id: { $nin: voiceSessionIds },
+          }).maxTimeMS(READ_DEADLINE_MS),
+        ),
     ]);
 
     return {

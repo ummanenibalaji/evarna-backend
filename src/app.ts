@@ -53,22 +53,14 @@ export interface BuildAppOptions {
  *   TRUST_PROXY=10.0.0.0/8   only proxies in this range
  *   unset                    direct connections (local development)
  *
- * A hop count becomes a FUNCTION, not a number. Fastify hands a number to
- * proxy-addr's numeric mode, which deliberately fails closed — `getTrustProxyFn`
- * returns `() => false` for a number, on the grounds that a hop count cannot
- * validate the immediate peer. So `trustProxy: 1` trusted nothing at all:
- * request.ip stayed the load balancer, which is the exact bug this setting
- * exists to fix, and check:routes caught it ("got 127.0.0.1"). The function
- * form is what proxy-addr actually consults: trusting hop i means accepting
- * the next address in the chain, so `hop < n` trusts n proxies.
+ * A hop count is passed to Fastify as a number, which it turns into
+ * `(address, hop) => hop < n` itself (getTrustProxyFn in lib/request.js).
  */
-export function parseTrustProxy(raw: string): boolean | string | ((address: string, hop: number) => boolean) {
+export function parseTrustProxy(raw: string): boolean | number | string {
   const v = raw.trim();
   if (!v || v === "false") return false;
   if (v === "true") return true;
-  if (!/^\d+$/.test(v)) return v;
-  const hops = Number(v);
-  return (_address: string, hop: number) => hop < hops;
+  return /^\d+$/.test(v) ? Number(v) : v;
 }
 
 export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInstance> {
