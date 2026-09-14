@@ -18,6 +18,7 @@
     "check:adaptation": "tsx src/checks/adaptation.check.ts",
     "check:activity": "tsx src/checks/activity.check.ts",
     "check:entitlement": "tsx src/checks/entitlement.check.ts",
+    "check:revenuecat": "tsx src/checks/revenuecat.check.ts",
     "check:voice-latency": "tsx src/checks/voice-latency.check.ts",
     "check:voice-tts-ownership": "tsx src/checks/voice-tts-ownership.check.ts",
     "check:sentry": "tsx src/checks/sentry.check.ts",

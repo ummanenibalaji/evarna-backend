@@ -36,7 +36,7 @@ export const PLANS: BillingPlan[] = [
     daily_messages: TIERS.plus.daily_messages,
     monthly_usd: 19.99,
     annual_monthly_usd: 12.49,
-    product_ids: { monthly: "evarna.plus.monthly", annual: "evarna.plus.annual" },
+    product_ids: { monthly: "evarna.plus:monthly", annual: "evarna.plus:annual" },
   },
   {
     tier: "premium",
@@ -45,7 +45,7 @@ export const PLANS: BillingPlan[] = [
     daily_messages: TIERS.premium.daily_messages,
     monthly_usd: 39.99,
     annual_monthly_usd: 24.99,
-    product_ids: { monthly: "evarna.premium.monthly", annual: "evarna.premium.annual" },
+    product_ids: { monthly: "evarna.premium:monthly", annual: "evarna.premium:annual" },
   },
 ];
 

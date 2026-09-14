@@ -826,6 +826,10 @@ async function run(): Promise<void> {
   step("22b. voice minutes cannot be backdated away, and calls do not spend the text cap");
   await runBillingIntegrityChecks(a.token, a.user_id, characterId);
 
+  // ── 22c ───────────────────────────────────────────────────────────────────
+  step("22c. only RevenueCat can call the store webhook, and sync needs sign-in");
+  await runStoreSyncChecks(a.token);
+
   console.log(`\n✅ smoke check passed — ${passed} assertions`);
   console.log(`   test data is named "${SMOKE_PREFIX}-*" if you want to purge it.`);
   console.log(`   users left behind: A (${a.user_id}), minor (${minorSession.user_id}), reborn B (${reborn.user_id}).`);
@@ -1258,6 +1262,41 @@ async function runUsageLimitChecks(
     ok("a call that runs out of minutes is told so, and nothing more is generated");
   } finally {
     await Session.deleteMany({ user_id: otherUserId, character_id: fakeCharacter });
+  }
+}
+
+/**
+ * The store plumbing, as far as it can be tested without RevenueCat: who is let
+ * in, and what a server without billing keys says. The mapping from a store
+ * record to a plan is covered offline by check:revenuecat.
+ */
+async function runStoreSyncChecks(token: string): Promise<void> {
+  const hook = (authorization: string | null, body: unknown): Promise<Response> =>
+    fetch(`${API}/billing/revenuecat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(authorization ? { Authorization: authorization } : {}) },
+      body: JSON.stringify(body),
+    });
+  const testEvent = { event: { type: "TEST", id: "smoke-test" } };
+  assert.equal((await hook(null, testEvent)).status, 401, "the store webhook accepted a request with no authorization");
+  assert.equal((await hook(`Bearer ${token}`, testEvent)).status, 401, "the store webhook accepted an app session token");
+  ok("the store webhook refuses anyone without RevenueCat's secret");
+
+  const secret = process.env["REVENUECAT_WEBHOOK_AUTH"];
+  if (secret) {
+    assert.equal((await hook(secret, testEvent)).status, 200, "RevenueCat's own TEST event was refused");
+    ok("RevenueCat's TEST event is accepted with the configured secret");
+  }
+
+  assert.equal((await api("POST", "/billing/sync", null, {})).status, 401, "store sync must require sign-in");
+  const sync = await api("POST", "/billing/sync", token, {});
+  if (!process.env["REVENUECAT_SECRET_KEY"]) {
+    assert.equal(sync.status, 503, `sync without a RevenueCat key → ${sync.status}, expected 503`);
+    assert.equal(sync.json.code, "BILLING_NOT_CONFIGURED");
+    ok("without a RevenueCat key, sync says billing isn't set up instead of failing obscurely");
+  } else {
+    assert.equal(sync.status, 200, `sync → ${sync.status}`);
+    ok("sync reads the store and returns the entitlement");
   }
 }
 

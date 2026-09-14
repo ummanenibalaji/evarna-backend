@@ -46,6 +46,11 @@ export const env = {
   TRUST_PROXY: process.env["TRUST_PROXY"] ?? "",
   // Crash reporting. Unset = nothing is sent (see config/sentry.ts).
   SENTRY_DSN: process.env["SENTRY_DSN"] ?? "",
+  // Store billing through RevenueCat. The secret key reads a customer's
+  // purchases; the webhook value is what RevenueCat sends in Authorization.
+  // Unset = purchases can't be synced (POST /billing/sync answers 503).
+  REVENUECAT_SECRET_KEY: process.env["REVENUECAT_SECRET_KEY"] ?? "",
+  REVENUECAT_WEBHOOK_AUTH: process.env["REVENUECAT_WEBHOOK_AUTH"] ?? "",
   RESEND_API_KEY: process.env["RESEND_API_KEY"] ?? "",
   EMAIL_FROM: process.env["EMAIL_FROM"] ?? "Evarna <noreply@evarna.app>",
 } as const;

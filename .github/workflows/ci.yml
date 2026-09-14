@@ -32,7 +32,7 @@ jobs:
       # because it needs Atlas, Redis and a real OpenAI key.
       - name: Offline checks
         run: |
-          for check in prompt auth routes studio outreach adaptation activity voice-tts-ownership entitlement sentry; do
+          for check in prompt auth routes studio outreach adaptation activity voice-tts-ownership entitlement revenuecat sentry; do
             echo "::group::check:$check"
             npm run check:$check
             echo "::endgroup::"

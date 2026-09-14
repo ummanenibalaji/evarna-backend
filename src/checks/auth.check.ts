@@ -183,8 +183,8 @@ async function main(): Promise<void> {
   // Same reasoning as the allowlist: the hook skips these, so each one is a
   // handler that must verify for itself.
   check(
-    "self-authenticated routes are exactly the EVI model endpoint",
-    JSON.stringify([...SELF_AUTHENTICATED_ROUTES_FOR_TEST]) === JSON.stringify(["/api/v1/voice/clm/chat/completions"]),
+    "self-authenticated routes are exactly the EVI model endpoint and the RevenueCat webhook",
+    JSON.stringify([...SELF_AUTHENTICATED_ROUTES_FOR_TEST]) === JSON.stringify(["/api/v1/voice/clm/chat/completions", "/api/v1/billing/revenuecat"]),
   );
 
   console.log("\nVoice-model (EVI) tokens");

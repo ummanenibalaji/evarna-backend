@@ -39,6 +39,8 @@ const PUBLIC_ROUTES = new Set<string>([
 // not the app — calls, with a token scoped to a single voice session.
 const SELF_AUTHENTICATED_ROUTES = new Set<string>([
   "/api/v1/voice/clm/chat/completions",
+  // RevenueCat's webhook, authenticated by its shared secret (billing.routes.ts).
+  "/api/v1/billing/revenuecat",
 ]);
 export const SELF_AUTHENTICATED_ROUTES_FOR_TEST: ReadonlySet<string> = SELF_AUTHENTICATED_ROUTES;
 
