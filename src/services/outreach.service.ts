@@ -321,8 +321,11 @@ async function handleCrisisUser(
     .lean();
   if (already) return;
 
-  const user = await User.findById(userId).select("push_token timezone").lean();
-  if (!user?.push_token || isQuietHours(user.timezone, now)) return;
+  // Turning check-ins off is respected here too. The crisis response itself
+  // already gave helplines in the moment; this follow-up is outreach the user
+  // has explicitly declined.
+  const user = await User.findById(userId).select("push_token timezone checkins_enabled").lean();
+  if (!user?.push_token || user.checkins_enabled === false || isQuietHours(user.timezone, now)) return;
 
   const character = await Character.findById(crisis.character_id)
     .select("name mode")
@@ -452,12 +455,16 @@ export async function runOutreachSweep(now = new Date()): Promise<SweepResult> {
       if (live.length === 0) continue;
 
       const user = await User.findById(userId)
-        .select("push_token timezone last_active_at")
+        .select("push_token timezone last_active_at checkins_enabled")
         .lean();
 
       // 4. No device, no message. Leave the hint pending — they may grant
       //    permission later and it is still fresh until it expires.
       if (!user?.push_token) { result.skipped += live.length; continue; }
+
+      // 4b. Check-ins turned off in Settings. Also left pending, so turning
+      //     them back on before the hint expires still delivers it.
+      if (user.checkins_enabled === false) { result.skipped += live.length; continue; }
 
       // 5. Quiet hours. Also leaves it pending: a later sweep sends it.
       if (isQuietHours(user.timezone, now)) { result.skipped += live.length; continue; }

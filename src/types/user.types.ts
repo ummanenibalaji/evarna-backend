@@ -21,6 +21,8 @@ export interface IUser {
   push_token: string | null;
   // IANA name, refreshed from the device on each launch (people travel).
   timezone: string | null;
+  // Settings → Daily check-in; false stops proactive outreach.
+  checkins_enabled: boolean;
   created_at: Date;
   last_active_at: Date;
 }

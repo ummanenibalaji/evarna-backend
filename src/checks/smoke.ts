@@ -740,7 +740,7 @@ async function run(): Promise<void> {
 
   // ── 16 ────────────────────────────────────────────────────────────────────
   step("16. proactive outreach send policy (a regression here messages someone in crisis)");
-  await runOutreachChecks(a.user_id, characterId);
+  await runOutreachChecks(a.token, a.user_id, characterId);
 
   // ── 17 ────────────────────────────────────────────────────────────────────
   step("17. a reply that lands while you are away still reaches you");
@@ -1415,7 +1415,7 @@ async function runEviModelChecks(appToken: string, userId: string, characterId: 
  * endpoint with a deliberately unregistered token, which is also how the
  * "dead token gets dropped" assertion is made.
  */
-async function runOutreachChecks(userId: string, characterId: string): Promise<void> {
+async function runOutreachChecks(token: string, userId: string, characterId: string): Promise<void> {
   const charObjId = new Types.ObjectId(characterId);
   const now = Date.now();
 
@@ -1559,6 +1559,39 @@ async function runOutreachChecks(userId: string, characterId: string): Promise<v
     "a hint skipped for lack of a device must stay pending, not be consumed",
   );
   ok("no device means nothing sent and nothing lost");
+
+  // 8b. Settings → Daily check-in off. Every other gate is opened (a device,
+  //     awake hours, not active today), so the only thing that can stop the
+  //     send is the setting. The unregistered token proves whether a send was
+  //     attempted: Expo answers DeviceNotRegistered, which clears it.
+  const FAKE_DEVICE = "ExponentPushToken[smoke-not-a-real-device]";
+  const off = await api<{ checkins_enabled: boolean }>("PATCH", "/users/me", token, { checkins_enabled: false });
+  assert.equal(off.status, 200, `PATCH /users/me failed: ${JSON.stringify(off.json)}`);
+  assert.equal(off.json.data?.checkins_enabled, false, "the check-in setting was not saved");
+  const me = await api<{ checkins_enabled: boolean }>("GET", "/auth/me", token);
+  assert.equal(me.json.data?.checkins_enabled, false, "/auth/me does not report the saved setting, so the app would show it on");
+  await User.updateOne(
+    { _id: userId },
+    { $set: { push_token: FAKE_DEVICE, last_active_at: new Date(now - 2 * DAY) } },
+  );
+  await runOutreachSweep(new Date());
+  assert.equal(
+    (await User.findById(userId).select("push_token").lean())?.push_token,
+    FAKE_DEVICE,
+    "a user who turned check-ins off was sent one",
+  );
+  assert.equal(await statusOf(pending), "pending", "a hint held back by the setting must stay pending");
+  ok("turning check-ins off stops them, and the setting round-trips through the API");
+
+  await api("PATCH", "/users/me", token, { checkins_enabled: true });
+  await runOutreachSweep(new Date());
+  assert.equal(
+    (await User.findById(userId).select("push_token").lean())?.push_token ?? null,
+    null,
+    "with check-ins back on, the sweep never tried to send",
+  );
+  ok("turning check-ins back on resumes them");
+  await User.updateOne({ _id: userId }, { $set: { last_active_at: new Date() } });
 
   // 9. A deleted companion stops messaging.
   await Character.updateOne({ _id: charObjId }, { $set: { is_active: false } });

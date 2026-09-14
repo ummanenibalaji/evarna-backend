@@ -49,6 +49,10 @@ const userSchema = new Schema<IUser>(
     // launch rather than asked once at signup: people travel, and a stale
     // timezone means a notification at 3am.
     timezone: { type: String, default: null },
+    // Settings → Daily check-in. Off stops proactive outreach: scheduled
+    // follow-ups and the post-crisis check-in. Replies the user asked for are
+    // not outreach, so their notifications still arrive.
+    checkins_enabled: { type: Boolean, default: true },
     created_at: { type: Date, default: () => new Date() },
     last_active_at: { type: Date, default: () => new Date() },
   },

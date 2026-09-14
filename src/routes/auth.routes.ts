@@ -132,7 +132,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.get("/me", async (request, reply) => {
     const userId = getUserId(request);
     const user = await User.findById(userId)
-      .select("display_name email gender date_of_birth communication_style onboarding_completed created_at")
+      .select("display_name email gender date_of_birth communication_style onboarding_completed created_at checkins_enabled")
       .lean();
 
     if (!user) {
@@ -153,6 +153,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         // Derived live, never read from the stored snapshot.
         is_minor: isMinorNow(user.date_of_birth),
         member_since: user.created_at,
+        checkins_enabled: user.checkins_enabled !== false,
       },
     });
   });

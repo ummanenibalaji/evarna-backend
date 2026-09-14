@@ -49,6 +49,7 @@ const UpdateMeSchema = z.object({
   display_name: z.string().min(1).max(50).optional(),
   communication_style: z.enum(["warm", "direct", "funny", "calm"]).optional(),
   gender: z.enum(["male", "female", "nonbinary", "undisclosed"]).optional(),
+  checkins_enabled: z.boolean().optional(),
 });
 
 // Both prefixes are in the wild: Expo issues `ExponentPushToken[...]` and
@@ -268,7 +269,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       { $set: parsed.data },
       { new: true },
     )
-      .select("display_name gender communication_style email onboarding_completed")
+      .select("display_name gender communication_style email onboarding_completed checkins_enabled")
       .lean();
 
     if (!updated) return reply.status(404).send({ success: false, error: "User not found" });
