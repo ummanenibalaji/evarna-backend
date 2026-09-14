@@ -87,6 +87,7 @@ src/
 │   └── voice.routes.ts                # Sprint 4: voice session + webhook + voice catalog
 ├── services/
 │   ├── conversation.service.ts        # Text LLM streaming pipeline
+│   ├── entitlement.service.ts         # canStart() — the one gate on paid usage
 │   ├── prompt.service.ts              # Prompt assembly
 │   ├── safety.service.ts              # OpenAI Moderation + crisis detection
 │   ├── session-context.service.ts     # Redis session context
@@ -323,6 +324,11 @@ SSE event types: `chunk` (each token), `done` (turn complete), `crisis` (988 hot
 | DELETE | `/api/v1/memories/:memory_id` | Soft-delete one memory |
 | DELETE | `/api/v1/memories/character/:character_id` | Bulk soft-delete |
 
+### Billing
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/billing/entitlement` | Current tier, voice balance, message cap, period end, and the store catalog |
+
 ### Voice (Sprint 4)
 | Method | Path | Description |
 |---|---|---|
@@ -417,6 +423,85 @@ Each archetype has its own system prompt, behavioral rules, safety overrides, an
 Voices are user-selectable; not bound to archetypes.
 
 ---
+
+## Entitlements and metering
+
+One gate decides everything a user can start that costs money:
+`canStart(userId, kind)` in
+`src/services/entitlement.service.ts`. `POST /sessions/start` (for voice kinds),
+`POST /voice/sessions/start` and `POST /conversations/send` all call it before
+spending anything. A voice minute costs roughly $0.085 all-in, so an ungated
+account can outrun any subscription price.
+
+| Tier | Voice | Text | Price |
+|---|---|---|---|
+| `free` | 8 min/month | 100 messages/day | — |
+| `plus` | 120 min/month | 1,000/day (abuse ceiling) | $19.99/mo, or $12.49/mo annually |
+| `premium` | 400 min/month | 2,000/day | $39.99/mo, or $24.99/mo annually |
+
+Allowances and prices live in `src/data/tiers.ts` and are pinned by
+`npm run check:entitlement`, so changing one is a deliberate edit. Top-up packs
+(30/75/150 min) credit `topup_seconds`, a wallet that does not expire with the
+period — **carried but not yet spendable**: usage is derived per period, so a
+wallet added on top of it would be re-granted every renewal. It becomes
+spendable with the usage counters, and nothing can buy one before then.
+
+**How usage is measured.** Voice is billed per connected second, derived from
+session rows rather than counted incrementally — deriving is slower but it
+cannot silently disagree with the source data. Per session:
+
+- `completed` bills its recorded `duration_seconds`, floored at 0 and capped at
+  the time actually elapsed since the session started. Both bounds matter:
+  `POST /sessions/:id/end` takes `ended_at` from the client, so a timestamp
+  before the session started would mint minutes and one in the future would
+  claim any duration at all. `started_at` is server-set, so elapsed time is a
+  true upper bound.
+- `interrupted` bills its duration **minus the sweep's 30-minute idle window**.
+  That status means the stale sweep closed the session, so the duration always
+  includes at least that idle half hour: a 31-minute swept session bills a
+  minute, a 45-minute one bills fifteen. Billing it whole would zero a free
+  month whenever the worker restarted; billing a flat token amount would make
+  force-quitting the app a discount on an hour of TTS. Goes away when M-03 lands
+  accurate durations.
+- `active` bills the seconds it has been connected so far, so several
+  simultaneous calls are not free.
+
+The monthly period is UTC and anchored to the purchase instant, or to signup for
+a free account — deliberately **not** the store's period, because an annual
+plan's store window is a year long while 400 minutes is a monthly allowance. The
+daily message cap resets at the user's **local** midnight.
+
+**Refusals** (explicit codes, because the error handler drops `code` from thrown
+errors):
+
+| Status | `code` | Meaning |
+|---|---|---|
+| 402 | `VOICE_MINUTES_EXHAUSTED` | The monthly allowance is spent — this is the paywall trigger |
+| 429 | `DAILY_MESSAGE_CAP` | Text cap reached; carries `Retry-After` |
+| 409 | `CALL_IN_PROGRESS` | Two or more live voice sessions — a runaway client |
+
+This is a **start** gate, and the two gaps it leaves are worth knowing. A call
+in progress is metered while it runs, so the next one is refused — but nothing
+cuts off the call you are on, so a single call can overrun its allowance for as
+long as it lasts. (The overrun is charged to the period when the call ends, so
+it cannot be repeated within the month.) And because the check and the session
+insert are not atomic, several starts fired at the same instant all see zero
+live calls. Mid-call cutoff and the in-call reminders land with the usage
+counters.
+
+If the usage reads fail, the gate **allows** and flags the response `degraded`.
+Refusing everyone during a database blip would turn a slow database into a
+product-wide outage; the cost is a few free minutes.
+
+**Testing a paid tier** before StoreKit exists:
+
+```bash
+npm run grant:entitlement -- --user <userId> --tier plus --months 1
+npm run grant:entitlement -- --user <userId> --reset
+```
+
+It refuses to run with `NODE_ENV=production`, and refuses to overwrite a
+subscription that came from a real store.
 
 ## Safety
 

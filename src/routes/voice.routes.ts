@@ -5,6 +5,7 @@ import { Session } from "../models/session.model.js";
 import { Character } from "../models/character.model.js";
 import { initSessionContext } from "../services/session-context.service.js";
 import { generateRoomToken, LiveKitNotConfiguredError } from "../services/livekit-token.service.js";
+import { canStart, refuse } from "../services/entitlement.service.js";
 import { WHISPER_VOICES } from "../data/voices.js";
 import { bearerToken, getUserId } from "../middleware/auth.js";
 import { issueClmToken, verifyClmToken } from "../services/auth.service.js";
@@ -92,7 +93,14 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const user_id = getUserId(request);
+
+    // The plan first, then the abuse ceiling. A voice minute is roughly $0.085
+    // all-in and the largest variable cost in the product, so this is the one
+    // refusal the app turns into a paywall rather than an apology.
+    const gate = await canStart(user_id, "voice");
+    if (!gate.allowed) return refuse(reply, gate);
     await assertCanStartCall(user_id);
+
     const started = await createVoiceSession(user_id, parsed.data.character_id);
     if (!started.ok) return reply.status(started.status).send({ success: false, error: started.error });
     const { sessionId } = started;
@@ -137,6 +145,11 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ success: false, error: parsed.error.errors[0]?.message ?? "Invalid input" });
     }
     const user_id = getUserId(request);
+
+    // Same gate as the LiveKit path: EVI calls cost the same minutes, so a
+    // route that bypassed it would be a hole in the meter.
+    const gate = await canStart(user_id, "voice");
+    if (!gate.allowed) return refuse(reply, gate);
     await assertCanStartCall(user_id);
 
     // Before creating the session, so a misconfigured server does not leave an

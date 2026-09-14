@@ -17,11 +17,13 @@
     "check:outreach": "tsx src/checks/outreach.check.ts",
     "check:adaptation": "tsx src/checks/adaptation.check.ts",
     "check:activity": "tsx src/checks/activity.check.ts",
+    "check:entitlement": "tsx src/checks/entitlement.check.ts",
     "check:voice-latency": "tsx src/checks/voice-latency.check.ts",
     "check:voice-tts-ownership": "tsx src/checks/voice-tts-ownership.check.ts",
     "smoke": "tsx src/checks/smoke.ts",
     "setup:db": "tsx src/scripts/setup-db.ts",
     "purge:studio-memories": "tsx src/scripts/purge-studio-memories.ts",
+    "grant:entitlement": "tsx src/scripts/grant-entitlement.ts",
     "latency-report": "tsx src/scripts/latency-report.ts"
   },
   "dependencies": {

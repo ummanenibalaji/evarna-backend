@@ -4,6 +4,7 @@ import { Types } from "mongoose";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { streamConversation } from "../services/conversation.service.js";
 import { findOwnedSession } from "../services/account.service.js";
+import { canStart, refuse } from "../services/entitlement.service.js";
 import { notifyUnreadReply } from "../services/outreach.service.js";
 import { getUserId } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
@@ -47,7 +48,17 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     }
     const character_id = session.character_id.toString();
 
-    // Before the hijack, so a refusal is a JSON 429 rather than a broken stream.
+    // Both before reply.hijack() and not a line later: once the response is
+    // hijacked a refusal can only be an SSE event, and the app's stream reader
+    // turns any of those into a generic "couldn't reach the server" bubble — so
+    // a limit would read as a bug.
+    //
+    // Two checks, two jobs. `canStart` is the plan: what this tier is allowed
+    // per day, answered with a code the app turns into the cap card.
+    // `assertCanSendMessage` is the abuse ceiling underneath it: a burst per
+    // minute no human types, which entitlements have no opinion about.
+    const gate = await canStart(user_id, "text");
+    if (!gate.allowed) return refuse(reply, gate);
     await assertCanSendMessage(user_id);
 
     // Take ownership of the raw response for SSE

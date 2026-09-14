@@ -117,10 +117,16 @@ console.log("\nClient IP behind a proxy");
   direct !== "203.0.113.9"
     ? pass("unset TRUST_PROXY ignores a client-supplied X-Forwarded-For")
     : fail("unset TRUST_PROXY ignores a client-supplied X-Forwarded-For", "a forged header was trusted");
-  const parsed = [parseTrustProxy("false"), parseTrustProxy("true"), parseTrustProxy("2"), parseTrustProxy("10.0.0.0/8")];
-  JSON.stringify(parsed) === JSON.stringify([false, true, 2, "10.0.0.0/8"])
+  // A hop count parses to a function, not a number: Fastify's numeric mode
+  // trusts nothing, so a number here silently did nothing at all.
+  const hops = parseTrustProxy("2");
+  const shape = [parseTrustProxy("false"), parseTrustProxy("true"), typeof hops, parseTrustProxy("10.0.0.0/8")];
+  JSON.stringify(shape) === JSON.stringify([false, true, "function", "10.0.0.0/8"])
     ? pass("TRUST_PROXY parses booleans, hop counts and address ranges")
-    : fail("TRUST_PROXY parses booleans, hop counts and address ranges", JSON.stringify(parsed));
+    : fail("TRUST_PROXY parses booleans, hop counts and address ranges", JSON.stringify(shape));
+  typeof hops === "function" && hops("10.0.0.1", 0) && hops("10.0.0.2", 1) && !hops("10.0.0.3", 2)
+    ? pass("TRUST_PROXY=2 trusts exactly two hops")
+    : fail("TRUST_PROXY=2 trusts exactly two hops", "the hop function does not stop at the second proxy");
 }
 
 // The hook skips these, so the handler is the only thing standing between the

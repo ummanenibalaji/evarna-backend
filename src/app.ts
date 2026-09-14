@@ -16,6 +16,7 @@ import { memoryRoutes } from "./routes/memory.routes.js";
 import { voiceRoutes } from "./routes/voice.routes.js";
 import { studioRoutes } from "./routes/studio.routes.js";
 import { reportRoutes } from "./routes/report.routes.js";
+import { billingRoutes } from "./routes/billing.routes.js";
 
 /**
  * Build the Fastify app without connecting to anything.
@@ -51,12 +52,23 @@ export interface BuildAppOptions {
  *   TRUST_PROXY=1            one hop (a typical load balancer or PaaS router)
  *   TRUST_PROXY=10.0.0.0/8   only proxies in this range
  *   unset                    direct connections (local development)
+ *
+ * A hop count becomes a FUNCTION, not a number. Fastify hands a number to
+ * proxy-addr's numeric mode, which deliberately fails closed — `getTrustProxyFn`
+ * returns `() => false` for a number, on the grounds that a hop count cannot
+ * validate the immediate peer. So `trustProxy: 1` trusted nothing at all:
+ * request.ip stayed the load balancer, which is the exact bug this setting
+ * exists to fix, and check:routes caught it ("got 127.0.0.1"). The function
+ * form is what proxy-addr actually consults: trusting hop i means accepting
+ * the next address in the chain, so `hop < n` trusts n proxies.
  */
-export function parseTrustProxy(raw: string): boolean | number | string {
+export function parseTrustProxy(raw: string): boolean | string | ((address: string, hop: number) => boolean) {
   const v = raw.trim();
   if (!v || v === "false") return false;
   if (v === "true") return true;
-  return /^\d+$/.test(v) ? Number(v) : v;
+  if (!/^\d+$/.test(v)) return v;
+  const hops = Number(v);
+  return (_address: string, hop: number) => hop < hops;
 }
 
 export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -113,6 +125,7 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await app.register(voiceRoutes, { prefix: "/api/v1/voice" });
   await app.register(studioRoutes, { prefix: "/api/v1/studio" });
   await app.register(reportRoutes, { prefix: "/api/v1/reports" });
+  await app.register(billingRoutes, { prefix: "/api/v1/billing" });
 
   return app;
 }
