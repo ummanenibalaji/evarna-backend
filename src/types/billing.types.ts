@@ -25,6 +25,8 @@ export interface BillingPlan {
   tier: Exclude<Tier, "free">;
   label: string;
   voice_minutes: number;
+  /** Messages a day. Shown on the paywall, so it must come from the tier, not copy. */
+  daily_messages: number;
   monthly_usd: number;
   /** Annual plans are sold as one payment but displayed per month. */
   annual_monthly_usd: number;

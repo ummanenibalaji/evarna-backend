@@ -183,6 +183,8 @@ async function main(): Promise<void> {
   check("plus is $19.99, or $12.49 a month annually", PLANS.some((x) => x.tier === "plus" && x.monthly_usd === 19.99 && x.annual_monthly_usd === 12.49));
   check("premium is $39.99, or $24.99 a month annually", PLANS.some((x) => x.tier === "premium" && x.monthly_usd === 39.99 && x.annual_monthly_usd === 24.99));
   check("every plan's advertised minutes match its tier allowance", PLANS.every((x) => x.voice_minutes * 60 === TIERS[x.tier].voice_seconds));
+  // The paywall said "Unlimited text" over a 1,000-a-day cap.
+  check("every plan's advertised daily messages match its tier cap", PLANS.every((x) => x.daily_messages === TIERS[x.tier].daily_messages));
   check("the packs are 30/75/150 minutes", TOPUP_PACKS.map((x) => x.seconds / 60).join(",") === "30,75,150");
   check("the 30-minute pack is $4.99", TOPUP_PACKS.some((x) => x.seconds === 1_800 && x.price_usd === 4.99));
   check("every product id is namespaced", [...PLANS.flatMap((x) => [x.product_ids.monthly, x.product_ids.annual]), ...TOPUP_PACKS.map((x) => x.product_id)].every((id) => id.startsWith("evarna.")));
