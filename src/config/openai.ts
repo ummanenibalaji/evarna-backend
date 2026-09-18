@@ -57,6 +57,67 @@ export function getConversationModel(): string {
   return env.LLM_MODEL || MODELS.CONVERSATION;
 }
 
+// ── Keeping a local model resident and its prompt cache warm ────────────────
+//
+// Ollama unloads an idle model after 5 minutes, and its OpenAI-compatible
+// endpoint IGNORES `keep_alive` — measured on 0.34: a request carrying
+// keep_alive "47m" still expired 5 minutes later, and every request resets the
+// timer to 5 minutes. Only the native API honours it. So residency is set
+// through /api/*, while the conversation itself stays on /v1.
+//
+// LLM_KEEP_ALIVE is an Ollama duration ("30m", "2h", or "-1" for forever).
+const LLM_KEEP_ALIVE = process.env["LLM_KEEP_ALIVE"] ?? "30m";
+
+/** The native Ollama API root for LLM_BASE_URL ("http://host:11434/v1" -> "http://host:11434"). */
+function localNativeBase(): string {
+  return env.LLM_BASE_URL.replace(/\/+$/, "").replace(/\/v1$/, "");
+}
+
+/**
+ * Extend how long the local model stays loaded. A prompt-less /api/generate
+ * only (re)loads the model and sets its expiry — no inference, and measured,
+ * the prompt cache survives it (the next request reused all 911 cached
+ * tokens). Fire-and-forget: it must never delay or fail a turn.
+ */
+export function keepLocalModelLoaded(): void {
+  if (!isLocalConversationModel()) return;
+  void fetch(`${localNativeBase()}/api/generate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: getConversationModel(), keep_alive: LLM_KEEP_ALIVE }),
+  }).catch(() => {});
+}
+
+/**
+ * Evaluate `messages` on the local model once, so its KV cache holds them.
+ *
+ * A later request whose prompt starts with the same tokens only evaluates what
+ * follows — measured on this machine at ~880 tokens/s cold, so a ~1,700-token
+ * companion prompt costs ~1.9s the first time and ~0.1s once cached. Sent to
+ * the native API because that is the only one that honours keep_alive; the
+ * chat template, and therefore the cached prefix, is the same on both.
+ */
+export async function primeLocalModel(
+  messages: Array<{ role: string; content: string }>,
+): Promise<void> {
+  if (!isLocalConversationModel()) return;
+  const res = await fetch(`${localNativeBase()}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: getConversationModel(),
+      messages,
+      stream: false,
+      keep_alive: LLM_KEEP_ALIVE,
+      // One token: this is about the prompt, not the answer. No other options,
+      // because a request with different model options can force a reload.
+      options: { num_predict: 1 },
+    }),
+  });
+  if (!res.ok) throw new Error(`local model prime failed: HTTP ${res.status}`);
+  await res.arrayBuffer();
+}
+
 /**
  * GPT-5.x reasons by default, and reasoning tokens count against
  * max_completion_tokens. Measured on this key: at "low", 13-17 of a 150-token

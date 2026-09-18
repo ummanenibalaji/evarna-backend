@@ -121,6 +121,20 @@ export class AuthError extends Error {
 export interface ProviderIdentity {
   sub: string;
   email: string | null;
+  /**
+   * Whether the PROVIDER vouches that this person controls `email`. Only a
+   * verified address may link a new sign-in method to an existing account —
+   * see findOrCreateUser.
+   */
+  email_verified: boolean;
+}
+
+/**
+ * Read a provider's email_verified claim. Google sends a boolean; Apple has
+ * sent the string "true". Anything else is unverified.
+ */
+export function emailVerifiedClaim(value: unknown): boolean {
+  return value === true || value === "true";
 }
 
 function audienceFor(provider: "google" | "apple"): string[] {
@@ -163,7 +177,11 @@ export async function verifyProviderToken(
   // verified on the first. Google always sends it. Either way the subject is
   // the identity — email is convenience, never the key.
   const email = typeof payload["email"] === "string" ? payload["email"].toLowerCase() : null;
-  return { sub: payload.sub, email };
+  return {
+    sub: payload.sub,
+    email,
+    email_verified: email !== null && emailVerifiedClaim(payload["email_verified"]),
+  };
 }
 
 // ── Email one-time codes ─────────────────────────────────────────────────────
@@ -333,7 +351,8 @@ export async function verifyEmailCode(email: string, code: string): Promise<Prov
 
   await getRedis().del(key);
   // The email IS the subject here: we just proved control of the inbox.
-  return { sub: normalized, email: normalized };
+  // Verified by construction: the caller just proved they can read this inbox.
+  return { sub: normalized, email: normalized, email_verified: true };
 }
 
 // ── User resolution ──────────────────────────────────────────────────────────
@@ -344,6 +363,18 @@ export interface AuthedUser {
   onboarding_completed: boolean;
 }
 
+function toAuthedUser(u: {
+  _id: Types.ObjectId;
+  token_version?: number;
+  onboarding_completed?: boolean;
+}): AuthedUser {
+  return {
+    _id: u._id,
+    token_version: u.token_version ?? 0,
+    onboarding_completed: u.onboarding_completed ?? false,
+  };
+}
+
 /**
  * Find the user behind a verified identity, or create a stub.
  *
@@ -352,24 +383,54 @@ export interface AuthedUser {
  * fields on the model are optional — `onboarding_completed` is what says whether
  * they have been supplied.
  *
- * Matching is by (provider, provider_sub), never by email alone: email is
- * mutable at the provider, Apple hides it behind a relay, and matching on it
- * would let someone take over an account by changing their address.
+ * Resolution, in order:
+ *   1. The exact identity — (provider, sub) — whether it created the account
+ *      or was linked to it later.
+ *   2. A VERIFIED email that already belongs to an account: this is the same
+ *      person arriving by a different method, so the new method is linked to
+ *      that account instead of creating a second one. Before this, signing in
+ *      by email and by Google with the same address produced two accounts with
+ *      separate companions, history and minutes.
+ *   3. Otherwise, a new account.
+ *
+ * Why step 2 is safe when "match on email" in general is not: an UNVERIFIED
+ * address is just a claim, and matching on it would let anyone who can type an
+ * address take the account. A verified one means the provider has checked that
+ * the person controls that inbox — and anyone who controls the inbox can
+ * already sign in to the account through email codes. So linking grants
+ * nothing that was not already available. Unverified emails never link.
  */
 export async function findOrCreateUser(
   provider: AuthProvider,
   identity: ProviderIdentity,
 ): Promise<AuthedUser> {
-  const existing = await User.findOne({ auth_provider: provider, provider_sub: identity.sub })
-    .select("token_version onboarding_completed")
-    .lean();
+  const fields = "token_version onboarding_completed";
 
-  if (existing) {
-    return {
-      _id: existing._id,
-      token_version: existing.token_version ?? 0,
-      onboarding_completed: existing.onboarding_completed,
-    };
+  const existing = await User.findOne({
+    $or: [
+      { auth_provider: provider, provider_sub: identity.sub },
+      { linked_identities: { $elemMatch: { provider, sub: identity.sub } } },
+    ],
+  })
+    .select(fields)
+    .lean();
+  if (existing) return toAuthedUser(existing);
+
+  if (identity.email && identity.email_verified) {
+    // Oldest first: if duplicates already exist from before linking, the new
+    // method joins the original account.
+    const owner = await User.findOneAndUpdate(
+      { email: identity.email },
+      { $push: { linked_identities: { provider, sub: identity.sub, linked_at: new Date() } } },
+      { sort: { created_at: 1 }, new: true, projection: fields },
+    ).lean();
+    if (owner) {
+      logger.info(
+        { provider, userId: owner._id.toString() },
+        "auth: linked a new sign-in method to an existing account",
+      );
+      return toAuthedUser(owner);
+    }
   }
 
   const created = await User.create({
@@ -381,11 +442,7 @@ export async function findOrCreateUser(
   });
 
   logger.info({ provider, userId: created._id.toString() }, "auth: new user");
-  return {
-    _id: created._id,
-    token_version: created.token_version,
-    onboarding_completed: created.onboarding_completed,
-  };
+  return toAuthedUser(created);
 }
 
 /** Invalidate every session for this user by bumping the version in their token. */

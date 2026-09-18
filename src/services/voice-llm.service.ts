@@ -3,6 +3,8 @@ import { llm } from "@livekit/agents";
 import { DEFAULT_API_CONNECT_OPTIONS } from "@livekit/agents";
 import type { APIConnectOptions } from "@livekit/agents";
 import { streamConversation } from "./conversation.service.js";
+import type { SpeculativeSynthesis } from "./conversation.service.js";
+import type { HumeTTS, Presynthesis } from "./hume-tts-plugin.js";
 import type { VoiceTurnTimer } from "./voice-metrics.service.js";
 import { getConversationModel } from "../config/openai.js";
 import { logger } from "../utils/logger.js";
@@ -40,6 +42,9 @@ export class CompanionLLM extends llm.LLM {
     private readonly ids: CompanionLLMOptions,
     // Optional so the degraded path and tests can construct one without metrics.
     private readonly timer?: VoiceTurnTimer,
+    // When set, a reply finished before its moderation verdict is synthesised
+    // ahead of the verdict and held (see SpeculativeSynthesis / Presynthesis).
+    private readonly presynthesizer?: HumeTTS,
   ) {
     super();
   }
@@ -72,7 +77,7 @@ export class CompanionLLM extends llm.LLM {
     return new CompanionLLMStream(this, this.ids, {
       chatCtx,
       connOptions: connOptions ?? DEFAULT_API_CONNECT_OPTIONS,
-    }, this.timer);
+    }, this.timer, this.presynthesizer);
   }
 }
 
@@ -95,13 +100,43 @@ function latestUserMessage(chatCtx: llm.ChatContext): string | null {
 }
 
 class CompanionLLMStream extends llm.LLMStream {
+  // Set once streamConversation() releases content (after the verdict).
+  private textReleased = false;
+
   constructor(
     companionLlm: CompanionLLM,
     private readonly ids: CompanionLLMOptions,
     opts: { chatCtx: llm.ChatContext; connOptions: APIConnectOptions },
     private readonly timer?: VoiceTurnTimer,
+    private readonly presynthesizer?: HumeTTS,
   ) {
     super(companionLlm, opts);
+  }
+
+  /**
+   * The sink streamConversation() may hand a finished-but-unmoderated reply
+   * to. A reply this stream presynthesised is discarded if the stream is
+   * cancelled first — a preemptive generation overtaken by the caller still
+   * talking — so it can never be adopted by a later turn's stream.
+   */
+  private speculativeSink(): SpeculativeSynthesis | undefined {
+    const tts = this.presynthesizer;
+    if (!tts) return undefined;
+    let pre: Presynthesis | null = null;
+    const signal = this.abortController.signal;
+    // Only a cancellation BEFORE the reply was released means nobody will
+    // adopt it. LiveKit also closes (aborts) this stream as soon as it has
+    // consumed the reply — at the very moment the TTS stream is adopting it —
+    // and discarding then threw away every presynthesis (measured: 5 of 5
+    // turns fell back, and paid for the discarded audio on top).
+    signal.addEventListener("abort", () => { if (!this.textReleased) pre?.discard(); }, { once: true });
+    return {
+      begin: (chunks) => {
+        if (signal.aborted) return;
+        pre = tts.presynthesize(chunks);
+      },
+      discard: () => pre?.discard(),
+    };
   }
 
   /**
@@ -130,6 +165,7 @@ class CompanionLLMStream extends llm.LLMStream {
         userId: this.ids.userId,
         message,
         isVoiceMode: true,
+        speculativeSynthesis: this.speculativeSink(),
       })) {
         switch (event.type) {
           // The crisis path bypasses the LLM and returns hotline wording. On a
@@ -142,6 +178,7 @@ class CompanionLLMStream extends llm.LLMStream {
             // measures what actually reached the TTS stage.
             if (!emitted) this.timer?.markLlmFirstToken();
             emitted = true;
+            this.textReleased = true;
             this.queue.put({ id, delta: { role: "assistant", content: event.content } });
             break;
 

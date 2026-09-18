@@ -100,9 +100,33 @@ export async function voiceSecondsRemaining(userId: string, now: Date = new Date
   return Math.max(0, USAGE_LIMITS.voiceMinutesPerDay * 60 - used);
 }
 
-export async function assertCanStartCall(userId: string, now: Date = new Date()): Promise<void> {
+/**
+ * `calls` lets a caller start the (read-only) call-history query early, in
+ * parallel with its other gates. The rate-limit counter is still only
+ * incremented here, when this is called — so a request refused by an earlier
+ * gate never spends a session start.
+ */
+export async function assertCanStartCall(
+  userId: string,
+  now: Date = new Date(),
+  calls: Promise<CallRow[]> = callsInLastDay(userId, now),
+): Promise<void> {
+  // Handled here so an early-started query that fails while an earlier gate is
+  // refusing cannot surface as an unhandled rejection; awaiting it below still
+  // throws.
+  calls.catch(() => {});
   await assertCanStartSession(userId);
-  const calls = await callsInLastDay(userId, now);
+  await checkCallLimits(await calls, now);
+}
+
+/** Start the day's call-history read now; pass the result to assertCanStartCall(). */
+export function prefetchCallHistory(userId: string, now: Date): Promise<CallRow[]> {
+  const calls = callsInLastDay(userId, now);
+  calls.catch(() => {});
+  return calls;
+}
+
+async function checkCallLimits(calls: CallRow[], now: Date): Promise<void> {
   const live = calls.filter(
     (c) => c.status === "active" && now.getTime() - new Date(c.started_at).getTime() < LIVE_CALL_WINDOW_MS,
   ).length;

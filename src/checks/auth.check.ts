@@ -19,7 +19,7 @@ import { SignJWT } from "jose";
 // Dynamic, not static: ESM evaluates every static import before the module body
 // runs, so a top-level `import` of anything that reads config/env.js would blow
 // up on the missing vars this file just set above.
-const { issueSessionToken, verifySessionToken, assertEmailDeliverable, issueClmToken, verifyClmToken } = await import(
+const { issueSessionToken, verifySessionToken, assertEmailDeliverable, issueClmToken, verifyClmToken, emailVerifiedClaim } = await import(
   "../services/auth.service.js"
 );
 const { ageInYears, isMinorNow, isUnderMinimumAge, MIN_AGE_YEARS } = await import("../utils/age.js");
@@ -227,6 +227,16 @@ async function main(): Promise<void> {
   check("production refuses to boot with no mail provider", !boots("production", ""));
   check("production boots once a provider is configured", boots("production", "re_test_key"));
   check("development still runs without one", boots("development", ""));
+
+  // Account linking trusts a provider's email ONLY when it is verified, so how
+  // the claim is read is the whole security question.
+  console.log("\nemail_verified claim");
+  check("Google's boolean true is verified", emailVerifiedClaim(true));
+  check("Apple's string \"true\" is verified", emailVerifiedClaim("true"));
+  check("false is not verified", !emailVerifiedClaim(false));
+  check("the string \"false\" is not verified", !emailVerifiedClaim("false"));
+  check("a missing claim is not verified", !emailVerifiedClaim(undefined));
+  check("a truthy non-true value is not verified", !emailVerifiedClaim(1) && !emailVerifiedClaim("yes"));
 
   console.log(
     failures === 0

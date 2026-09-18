@@ -1,12 +1,15 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { Types } from "mongoose";
 import { Character } from "../models/character.model.js";
 import { SCENARIOS, SCENARIO_IDS } from "../data/scenarios.js";
 import {
   createStudioCharacter,
   CompanionValidationError,
 } from "../services/character.service.js";
+import { invalidateCharacterConfig } from "../services/session-context.service.js";
 import { getUserId } from "../middleware/auth.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Studio characters count separately from companions — filling your companion
@@ -144,5 +147,45 @@ export async function studioRoutes(app: FastifyInstance): Promise<void> {
       }
       throw err;
     }
+  });
+
+  // DELETE /api/v1/studio/characters/:id — soft delete, the same as deleting a
+  // companion (DELETE /characters/:id). The row is deactivated, which drops it
+  // from the list above and frees a slot under STUDIO_CHARACTER_CAP. Its
+  // sessions, transcript and memories are kept, as they are for a companion:
+  //   - Sessions are the voice-minute ledger. entitlement.service sums them per
+  //     billing period, so deleting them would give the minutes back, and
+  //     call → delete → new character would reset the meter.
+  //   - Memory retrieval and usage summaries are scoped to character_id, so a
+  //     deactivated character's memories never reach any other conversation.
+  //   - "Forget me" is DELETE /users/me, which hard-deletes all of it.
+  //
+  // `mode` is part of the filter so this route is not a second way to delete a
+  // companion: a companion's id gets the same 404 as someone else's id.
+  app.delete<{ Params: { id: string } }>("/characters/:id", async (request, reply) => {
+    const userId = getUserId(request);
+    const { id } = request.params;
+    if (!Types.ObjectId.isValid(id)) {
+      return reply.status(404).send({ success: false, error: "Character not found" });
+    }
+
+    const updated = await Character.findOneAndUpdate(
+      { _id: id, user_id: userId, mode: "studio", is_active: true },
+      { $set: { is_active: false } },
+    )
+      .select("_id")
+      .lean();
+
+    if (!updated) {
+      return reply.status(404).send({ success: false, error: "Character not found" });
+    }
+
+    // Best effort, like deleteAccount: the row is already deactivated, so a
+    // Redis failure must not turn a finished delete into a 500 that the client
+    // retries into a 404. The cached config expires on its own within the hour.
+    await invalidateCharacterConfig(id).catch((err) =>
+      logger.error({ err, characterId: id }, "studio delete: failed invalidating character cache"),
+    );
+    return reply.send({ success: true });
   });
 }

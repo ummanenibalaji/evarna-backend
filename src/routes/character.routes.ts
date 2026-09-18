@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Types } from "mongoose";
 import { Character } from "../models/character.model.js";
 import { Memory } from "../models/memory.model.js";
+import { User } from "../models/user.model.js";
 import {
   createCompanion,
   CompanionValidationError,
@@ -54,6 +55,21 @@ export async function characterRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const userId = getUserId(request);
+
+    // Onboarding is where the date of birth is collected and the under-15 floor
+    // is enforced. Sign-in creates the account before that, so without this a
+    // client could skip POST /users/onboard and create a companion for someone
+    // whose age was never asked. The auth hook has already confirmed the user
+    // exists, so a missing document only means it was deleted mid-request.
+    const user = await User.findById(userId).select("onboarding_completed").lean();
+    if (!user?.onboarding_completed) {
+      return reply.status(409).send({
+        success: false,
+        error: "Finish setting up your account first.",
+        code: "NOT_ONBOARDED",
+      });
+    }
+
     // Mirrors the Studio cap. Each companion carries memory extraction, usage
     // summaries and outreach, so the count is a cost, not just a list length.
     const existing = await Character.countDocuments({ user_id: userId, mode: "companion", is_active: true });

@@ -6,6 +6,16 @@ import { resolveHumeVoice } from "../data/voices.js";
 export interface TTSAudioChunk {
   pcm: Int16Array;
   isLastChunk: boolean;
+  /**
+   * The text of the snippet this chunk belongs to, exactly as Hume echoes it.
+   * One flush can come back as several snippets (Hume splits long input at
+   * ~250 characters, and starts generating a snippet on its own once that much
+   * text is buffered, BEFORE any flush). Knowing which text each finished
+   * snippet spoke is the only reliable way to know the whole reply has been
+   * voiced — see ReplyCoverage in hume-tts-plugin.ts.
+   */
+  snippetText?: string;
+  snippetId?: string;
 }
 
 export interface TTSCallbacks {
@@ -24,6 +34,32 @@ const HUME_BASE_URL = "wss://api.hume.ai/v0/tts/stream/input";
  * never coming and accept the new turn's audio instead.
  */
 const DISCARD_DEADLINE_MS = 5000;
+
+/**
+ * Letters and digits only, lower-cased. Hume's echo of a snippet's text does
+ * not reproduce the input byte for byte — it re-spaces the text messages it was
+ * sent, and splits snippets at its own boundaries (a sentence's full stop can
+ * open the next snippet) — so whitespace and punctuation cannot be compared;
+ * the words can.
+ */
+export function normalizeSpoken(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+/** How much of the end of a text must match before it counts as spoken. */
+const COVERAGE_TAIL_CHARS = 40;
+
+/**
+ * Whether `spoken` (normalized snippet texts, in arrival order) has reached the
+ * end of `expected` (normalized text that was sent). The END must match, not
+ * just the length, so text spoken in front of a reply can never make it look
+ * finished before its own last words have arrived.
+ */
+export function spokenCovers(spoken: string, expected: string): boolean {
+  if (expected.length === 0) return true;
+  if (spoken.length < expected.length) return false;
+  return spoken.endsWith(expected.slice(-COVERAGE_TAIL_CHARS));
+}
 
 interface HumePublishTts {
   text?: string;
@@ -65,6 +101,24 @@ export class HumeTTSSession {
   // snippet-ends a reliable boundary.
   private discardSnippetsRemaining = 0;
   private discardStartedAt = 0;
+  // Text-mode discard (abandonTurn): how many characters of abandoned text —
+  // normalized, see normalizeSpoken() — Hume still has to finish speaking
+  // before the socket is clean. Precise where snippet counting is not: one
+  // flush can come back as several snippets, and a reply can start a snippet
+  // before it is flushed, so the number of snippets owed is not knowable in
+  // advance but the text owed always is.
+  private discardOwedChars = 0;
+
+  // What the current owner has sent and what of it Hume has finished speaking,
+  // so that a turn that stops listening early can be abandoned EXACTLY — see
+  // abandonTurn(). Normalized text.
+  private turnSent = "";
+  private turnSpoken = "";
+  // Text sent since the last flush. Hume keeps unflushed text buffered and
+  // speaks it at the START of whatever is flushed next — measured: text sent
+  // without a flush, then a new turn's text and flush, came back as ONE
+  // snippet containing both. An abandoned turn must never leave any behind.
+  private turnUnflushed = false;
 
   // Which SynthesizeStream currently owns this socket.
   //
@@ -139,6 +193,16 @@ export class HumeTTSSession {
         ws.off("error", onError);
         ws.off("unexpected-response", onUnexpected);
         logger.info({ voiceId: this.voiceId }, "Hume TTS socket open");
+        // A fresh socket carries nothing from the old one: no abandoned audio
+        // can arrive on it and no unflushed text is buffered in it. A discard
+        // guard left armed across the reconnect would only eat new audio.
+        this.discarding = false;
+        this.discardSnippetsRemaining = 0;
+        this.discardOwedChars = 0;
+        this.turnUnflushed = false;
+        this.turnSent = "";
+        this.turnSpoken = "";
+        this.pcmCarry = null;
         resolve();
       };
       const onError = (err: Error): void => {
@@ -155,7 +219,14 @@ export class HumeTTSSession {
 
     ws.on("message", (data: WebSocket.RawData) => {
       if (this.permanentlyClosed) return;
-      let msg: { type?: string; audio?: string; isLastChunk?: boolean; is_last_chunk?: boolean };
+      let msg: {
+        type?: string;
+        audio?: string;
+        isLastChunk?: boolean;
+        is_last_chunk?: boolean;
+        text?: string;
+        snippet_id?: string;
+      };
       try {
         msg = JSON.parse(data.toString());
       } catch (err) {
@@ -171,13 +242,11 @@ export class HumeTTSSession {
       if (this.discarding) {
         // Count the abandoned generation out. Once its last snippet has passed,
         // the socket is clean and the next turn's audio is safe to deliver.
-        if (Boolean(msg.is_last_chunk ?? msg.isLastChunk)) {
-          this.discardSnippetsRemaining -= 1;
-          if (this.discardSnippetsRemaining <= 0) {
-            this.discarding = false;
-            this.discardSnippetsRemaining = 0;
-            this.pcmCarry = null;
-          }
+        const last = Boolean(msg.is_last_chunk ?? msg.isLastChunk);
+        if (this.discardOwedChars > 0) {
+          this.countDiscardedText(msg.audio, last, typeof msg.text === "string" ? msg.text : undefined);
+        } else {
+          this.countDiscardedChunk(msg.audio, last);
         }
         return;
       }
@@ -189,8 +258,19 @@ export class HumeTTSSession {
       // Hume sends snake_case (`is_last_chunk`); older SDK docs used camelCase.
       const isLastChunk = Boolean(msg.is_last_chunk ?? msg.isLastChunk);
       const pcm = this.decodePcm(msg.audio, isLastChunk);
-      if (pcm.length === 0) return;
-      this.callbacks.onAudioChunk({ pcm, isLastChunk });
+      const snippetText = typeof msg.text === "string" ? msg.text : undefined;
+      // An empty chunk carries nothing to play, but a snippet's closing chunk
+      // still has to be reported even if it decoded to zero samples: it is
+      // what says that snippet's text has been spoken. Hume's empty utterance
+      // separator (0 ms, is_last_chunk, text "") is still dropped here.
+      if (pcm.length === 0 && !(isLastChunk && snippetText)) return;
+      if (isLastChunk && snippetText) this.turnSpoken += normalizeSpoken(snippetText);
+      this.callbacks.onAudioChunk({
+        pcm,
+        isLastChunk,
+        ...(snippetText !== undefined ? { snippetText } : {}),
+        ...(typeof msg.snippet_id === "string" ? { snippetId: msg.snippet_id } : {}),
+      });
     });
 
     ws.on("error", (err) => {
@@ -204,6 +284,58 @@ export class HumeTTSSession {
       if (this.socket === ws) this.socket = null;
       this.callbacks.onClose();
     });
+  }
+
+  /**
+   * Count one chunk of an abandoned generation out of the discard guard.
+   *
+   * Hume opens EVERY generation with an empty audio chunk that is itself flagged
+   * is_last_chunk — measured on three runs: a 0 ms chunk ~280-350ms after the
+   * flush, then the real audio from ~815-990ms. Counting that marker as a snippet
+   * end released the guard before the abandoned reply's real audio had arrived,
+   * and that audio was then delivered into the next turn and played inside it:
+   * exactly the cross-turn leak this guard exists to prevent. Only a last chunk
+   * that actually carries audio ends a snippet.
+   *
+   * Public so the regression check can drive it; the socket handler is the only
+   * production caller.
+   */
+  countDiscardedChunk(base64Audio: string, isLastChunk: boolean): void {
+    if (!this.discarding || !isLastChunk) return;
+    if (base64Audio.length === 0 || Buffer.from(base64Audio, "base64").length === 0) return;
+    this.discardSnippetsRemaining -= 1;
+    if (this.discardSnippetsRemaining <= 0) {
+      this.discarding = false;
+      this.discardSnippetsRemaining = 0;
+      this.pcmCarry = null;
+    }
+  }
+
+  /**
+   * Text-mode counterpart of countDiscardedChunk(), used after abandonTurn().
+   * A snippet's closing chunk pays off its text; Hume's empty separator (text
+   * "", 0 ms) pays nothing, so it cannot release the guard early. If Hume ever
+   * stops echoing snippet text, a closing chunk that carries audio releases the
+   * guard exactly as the snippet counter would.
+   *
+   * Public so the regression check can drive it.
+   */
+  countDiscardedText(base64Audio: string, isLastChunk: boolean, text: string | undefined): void {
+    if (!this.discarding || !isLastChunk) return;
+    if (text === undefined) {
+      if (base64Audio.length === 0 || Buffer.from(base64Audio, "base64").length === 0) return;
+      this.discardOwedChars = 0;
+    } else {
+      const paid = normalizeSpoken(text).length;
+      if (paid === 0) return;
+      this.discardOwedChars -= paid;
+    }
+    if (this.discardOwedChars <= 0) {
+      this.discarding = false;
+      this.discardOwedChars = 0;
+      this.discardSnippetsRemaining = 0;
+      this.pcmCarry = null;
+    }
   }
 
   /**
@@ -282,9 +414,61 @@ export class HumeTTSSession {
       );
       this.discarding = false;
       this.discardSnippetsRemaining = 0;
+      this.discardOwedChars = 0;
     }
 
+    // Whatever the previous owner left behind — text it never flushed, or
+    // audio it stopped reading before it had all arrived — is abandoned here,
+    // so it can neither be spoken inside this turn nor steal this turn's audio.
+    // A turn that finished normally leaves nothing, and this is a no-op.
+    this.abandonLeftovers("superseded");
+
     return ++this.ownerToken;
+  }
+
+  /**
+   * Abandon the owner's turn precisely: whatever of it Hume has not finished
+   * speaking is discarded, and nothing else.
+   *
+   * Replaces cancelTurn()/discardPending() on the streaming path. Those arm the
+   * guard for at least one snippet no matter what (`Math.max(1, …)`), which is
+   * right only when a snippet really is still coming. A preemptive reply that
+   * was cancelled AFTER all of its audio had arrived owed nothing — and the
+   * guard it armed swallowed the next reply's only snippet, which was heard as
+   * a reply with no voice. Measured in a live call, not hypothetical.
+   *
+   * After this the token no longer owns the socket, so a late sendText() from
+   * the abandoned stream cannot become part of the next turn.
+   */
+  abandonTurn(token: number): void {
+    if (!this.isOwner(token)) return;
+    this.abandonLeftovers("abandoned");
+    this.ownerToken++;
+  }
+
+  private abandonLeftovers(reason: "abandoned" | "superseded"): void {
+    // Unflushed text would be spoken at the start of the NEXT flush, glued to
+    // the next reply in one snippet. Flushing it now makes it its own
+    // utterance, generated (and discarded) ahead of anything new. This is that
+    // turn's first and only flush, so one-flush-per-reply still holds.
+    const hadUnflushed = this.turnUnflushed;
+    if (hadUnflushed) this.send({ flush: true });
+
+    const owed = this.turnSent.length - this.turnSpoken.length;
+    const finished = spokenCovers(this.turnSpoken, this.turnSent) || owed <= 0;
+    if (!finished) {
+      this.discarding = true;
+      this.discardOwedChars += owed;
+      this.discardStartedAt = Date.now();
+      logger.info(
+        { reason, owedChars: owed, flushedLeftover: hadUnflushed },
+        "Hume TTS: discarding the unspoken rest of an abandoned turn",
+      );
+    }
+
+    this.turnSent = "";
+    this.turnSpoken = "";
+    this.turnUnflushed = false;
   }
 
   /** Whether `token` still owns this socket. */
@@ -318,6 +502,10 @@ export class HumeTTSSession {
 
   sendText(text: string, token?: number): void {
     if (token !== undefined && !this.isOwner(token)) return;
+    if (this.isOpen()) {
+      this.turnSent += normalizeSpoken(text);
+      if (text.trim().length > 0) this.turnUnflushed = true;
+    }
     this.send({
       text,
       voice: resolveHumeVoice(this.voiceId),
@@ -326,6 +514,7 @@ export class HumeTTSSession {
 
   flush(token?: number): void {
     if (token !== undefined && !this.isOwner(token)) return;
+    this.turnUnflushed = false;
     this.send({ flush: true });
   }
 

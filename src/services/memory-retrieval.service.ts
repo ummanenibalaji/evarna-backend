@@ -88,7 +88,10 @@ function formatMemoryBlock(memories: ScoredMemory[]): string {
 export async function retrieveMemories(
   characterId: string,
   userId: string,
-  userMessage: string
+  userMessage: string,
+  // false only for connection warm-ups, whose results nobody reads: counting
+  // them as accesses would skew every memory's access metadata.
+  { recordAccess = true }: { recordAccess?: boolean } = {},
 ): Promise<string> {
   const characterObjId = new Types.ObjectId(characterId);
   const openai = getOpenAI();
@@ -177,7 +180,7 @@ export async function retrieveMemories(
 
   // 5. Update access metadata asynchronously — do not block conversation
   const retrievedIds = deduplicated.map((m) => m._id);
-  void Memory.updateMany(
+  if (recordAccess) void Memory.updateMany(
     { _id: { $in: retrievedIds } },
     { $inc: { access_count: 1 }, $set: { last_accessed_at: new Date() } }
   ).catch((err) => logger.error({ err }, "Failed to update memory access counts"));

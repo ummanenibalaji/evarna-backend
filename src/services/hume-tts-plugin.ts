@@ -1,10 +1,13 @@
-import { tts } from "@livekit/agents";
+import { tts, voice } from "@livekit/agents";
 import type { APIConnectOptions } from "@livekit/agents";
 import { AudioFrame } from "@livekit/rtc-node";
+import { ReadableStream } from "node:stream/web";
 import {
   HumeTTSSession,
   TTS_OUTPUT_SAMPLE_RATE,
   TTS_OUTPUT_CHANNELS,
+  normalizeSpoken,
+  spokenCovers,
 } from "./voice-tts.service.js";
 import type { TTSAudioChunk } from "./voice-tts.service.js";
 import { logger } from "../utils/logger.js";
@@ -20,18 +23,50 @@ import type { VoiceTurnTimer } from "./voice-metrics.service.js";
 // SynthesizeStream constructor and closed at the end of run(), so every turn
 // paid a fresh handshake to api.hume.ai. A recorded session showed 28 opens.
 
+type TextTransform = voice.textTransforms.TextTransform;
+
+/**
+ * LiveKit's default TTS text transforms. voice.service.ts passes this same
+ * list to both AgentSession and HumeTTS, so text synthesised ahead of time
+ * (Presynthesis) is transformed exactly as the streamed text would be.
+ */
+export const TTS_TEXT_TRANSFORMS: readonly TextTransform[] = ["filter_markdown", "filter_emoji"];
+
 export class HumeTTS extends tts.TTS {
   label = "hume.octave-2";
 
   // Lazily opened on the first stream, then shared by every turn of the call.
   private sharedSession: HumeTTSSession | null = null;
+  // At most one reply synthesised ahead of its moderation verdict.
+  private pendingPresynthesis: Presynthesis | null = null;
 
   constructor(
     private readonly voiceId: string,
     // Optional: the OpenAI fallback path and tests construct one without it.
     private readonly timer?: VoiceTurnTimer,
+    private readonly textTransforms: readonly TextTransform[] = TTS_TEXT_TRANSFORMS,
   ) {
     super(TTS_OUTPUT_SAMPLE_RATE, TTS_OUTPUT_CHANNELS, { streaming: true });
+  }
+
+  /**
+   * Start synthesising a finished reply whose moderation verdict is still out.
+   * Its audio is buffered, never emitted, until a SynthesizeStream carrying the
+   * same text adopts it — which can only happen after the verdict passes,
+   * because that is when the text is released to LiveKit. See Presynthesis.
+   */
+  presynthesize(chunks: readonly string[]): Presynthesis {
+    this.pendingPresynthesis?.discard();
+    const pre = new Presynthesis(this.getSession(), chunks, this.textTransforms);
+    this.pendingPresynthesis = pre;
+    return pre;
+  }
+
+  /** Hand the pending presynthesis (if still usable) to the stream about to run. */
+  takePresynthesis(): Presynthesis | null {
+    const pre = this.pendingPresynthesis;
+    this.pendingPresynthesis = null;
+    return pre && pre.pending ? pre : null;
   }
 
   override get model(): string { return "octave-2"; }
@@ -68,6 +103,123 @@ export class HumeTTS extends tts.TTS {
   }
 }
 
+/** Run text through LiveKit's own TTS text transforms, as its pipeline would. */
+async function transformForTts(
+  chunks: readonly string[],
+  transforms: readonly TextTransform[],
+): Promise<string[]> {
+  if (transforms.length === 0) return [...chunks];
+  const source = new ReadableStream<string>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+  const reader = voice.textTransforms.applyTextTransforms(source, transforms).getReader();
+  const out: string[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out.push(value);
+  }
+  return out;
+}
+
+/**
+ * A reply synthesised while its moderation verdict was still out.
+ *
+ * Moderation from this deployment takes 300ms-3.5s and is often slower than
+ * generating the whole reply. Before this, synthesis could not start until the
+ * verdict, and Hume then needed ~600ms more for first audio. Now the finished
+ * reply goes to Hume at once — ONE text send and ONE flush, the same shape as
+ * a normal turn — and its audio collects in this object's own queue.
+ *
+ * Nothing here is ever emitted by itself. Audio reaches the caller only when a
+ * SynthesizeStream ADOPTS it, and a stream exists only once
+ * streamConversation() has released the reply text, i.e. after the verdict
+ * passed. Adoption also requires the stream's text to be this text. On a
+ * crisis verdict, a mismatch, or a newer turn, discard() abandons the Hume turn
+ * and exactly its unspoken audio is dropped (abandonTurn).
+ */
+export class Presynthesis {
+  private state: "starting" | "ready" | "adopted" | "discarded" = "starting";
+  readonly queue = new AudioChunkQueue();
+  token = 0;
+  /** Exactly what Hume was sent, after LiveKit's transforms. */
+  text = "";
+  flushedAt = 0;
+  readonly ready: Promise<boolean>;
+
+  constructor(
+    private readonly session: HumeTTSSession,
+    chunks: readonly string[],
+    transforms: readonly TextTransform[],
+  ) {
+    this.ready = this.start(chunks, transforms).catch((err) => {
+      logger.warn({ err }, "hume-tts-plugin: presynthesis failed — the reply will be synthesised normally");
+      this.state = "discarded";
+      return false;
+    });
+  }
+
+  get pending(): boolean {
+    return this.state === "starting" || this.state === "ready";
+  }
+
+  private async start(chunks: readonly string[], transforms: readonly TextTransform[]): Promise<boolean> {
+    const pieces = await transformForTts(chunks, transforms);
+    await this.session.ensureConnected();
+    if (this.state !== "starting") return false;
+    // From here to the flush is synchronous, so discard() cannot interleave.
+    this.token = this.session.beginTurn();
+    this.session.setCallbacks({
+      onAudioChunk: (chunk) => this.queue.put(chunk),
+      onError: (err) => this.queue.put(err),
+      onClose: () => this.queue.put(null),
+    });
+    for (const piece of pieces) this.session.sendText(piece, this.token);
+    this.session.flush(this.token);
+    this.flushedAt = Date.now();
+    this.text = pieces.join("");
+    this.state = "ready";
+    return true;
+  }
+
+  /** Why the last adopt() said no — logged by the stream. */
+  refusal = "";
+
+  /** Take ownership if `streamText` is this reply. False means synthesise normally. */
+  async adopt(streamText: string): Promise<boolean> {
+    if (!(await this.ready)) {
+      this.refusal = "not-sent";
+      return false;
+    }
+    if (this.state !== "ready") {
+      this.refusal = this.state;
+      return false;
+    }
+    if (!this.session.isOwner(this.token)) {
+      this.refusal = "socket-reclaimed";
+      return false;
+    }
+    if (normalizeSpoken(streamText) !== normalizeSpoken(this.text)) {
+      this.refusal = `text-differs(${normalizeSpoken(streamText).length}/${normalizeSpoken(this.text).length})`;
+      return false;
+    }
+    this.state = "adopted";
+    return true;
+  }
+
+  /** Never to be heard: drop its Hume turn, and exactly its unspoken audio. */
+  discard(): void {
+    if (this.state === "adopted" || this.state === "discarded") return;
+    const sent = this.state === "ready";
+    this.state = "discarded";
+    // Still "starting": start() sees the state and never claims the socket.
+    if (sent) this.session.abandonTurn(this.token);
+  }
+}
+
 // ── Shared audio helpers ──────────────────────────────────────────────────────
 
 // Build a LiveKit AudioFrame from Hume's PCM Int16Array chunk.
@@ -76,10 +228,100 @@ function makeAudioFrame(pcm: Int16Array): AudioFrame {
 }
 
 /** Returned by next() when the wait window elapsed with no new chunk. */
-const IDLE = Symbol("idle");
+export const IDLE = Symbol("idle");
+/**
+ * Returned by next() when wake() released the wait early with nothing in it.
+ *
+ * Deliberately NOT the same as IDLE. It used to be, and that is the lost-reply
+ * bug: when the reply text finished, feedText() woke the drain loop, which read
+ * the wake-up as "the socket has been quiet for the whole idle window" and —
+ * because one pre-flush snippet had already produced audio — ended the turn a
+ * millisecond after the flush. Everything Hume generated for that flush was
+ * then thrown away and the caller heard nothing. A wake-up only means "your
+ * state changed, look again".
+ */
+export const WOKE = Symbol("woke");
+
+/** Stands in for LiveKit's flush sentinel when buffered input is replayed. */
+const REPLAY_END = Symbol("replay-end");
+
+/**
+ * Tracks which of a reply's text Hume has finished speaking.
+ *
+ * Hume never says "this flush is done": `is_last_chunk` closes one SNIPPET, a
+ * flush can come back as several, and a long reply starts its first snippet
+ * before the flush is even sent (Hume begins generating once ~250 characters
+ * are buffered). What every chunk does carry is the text of its snippet. So the
+ * reply is complete exactly when the snippets that have finished have spoken
+ * through to the end of the text that was sent — which is the one end-of-reply
+ * signal that cannot fire early.
+ *
+ * Content is compared, not just length: if text abandoned by an earlier turn
+ * were ever spoken in front of this reply, a length check would pass before the
+ * reply's own last words had arrived. Requiring the END of the reply to match
+ * the end of what has been spoken rules that out.
+ */
+export class ReplyCoverage {
+  private expected = "";
+  private spoken = "";
+  private readonly finished = new Set<string>();
+  /** Whether Hume has reported snippet text at all (it always has, measured). */
+  known = false;
+
+  /** The full text of the reply, as sent to Hume. */
+  setExpected(rawText: string): void {
+    this.expected = normalizeSpoken(rawText);
+  }
+
+  /** Forget what has been spoken — used when the reply is re-sent on a new socket. */
+  resetSpoken(): void {
+    this.spoken = "";
+    this.finished.clear();
+  }
+
+  /** Record a snippet's closing chunk. Idempotent per snippet id. */
+  snippetFinished(snippetId: string | undefined, snippetText: string | undefined): void {
+    if (snippetText === undefined) return;
+    this.known = true;
+    if (snippetId !== undefined) {
+      if (this.finished.has(snippetId)) return;
+      this.finished.add(snippetId);
+    }
+    this.spoken += normalizeSpoken(snippetText);
+  }
+
+  /** True once the end of the reply has been spoken. An empty reply is trivially complete. */
+  complete(): boolean {
+    return spokenCovers(this.spoken, this.expected);
+  }
+
+  get expectedChars(): number {
+    return this.expected.length;
+  }
+
+  get spokenChars(): number {
+    return this.spoken.length;
+  }
+
+  /**
+   * The part of `rawText` that has not been spoken yet, for re-sending after a
+   * socket death. Falls back to the whole text when what was spoken does not
+   * line up with the start of the reply.
+   */
+  unspokenSuffix(rawText: string): string {
+    if (this.complete()) return "";
+    if (this.spoken.length === 0 || !this.expected.startsWith(this.spoken)) return rawText;
+    let seen = 0;
+    for (let i = 0; i < rawText.length; i++) {
+      if (normalizeSpoken(rawText[i]!).length > 0) seen++;
+      if (seen === this.spoken.length) return rawText.slice(i + 1);
+    }
+    return "";
+  }
+}
 
 // Simple async queue that bridges Hume callback events to async iteration.
-class AudioChunkQueue {
+export class AudioChunkQueue {
   private _items: Array<TTSAudioChunk | Error | null> = [];
   private _resolve: (() => void) | null = null;
 
@@ -110,7 +352,7 @@ class AudioChunkQueue {
    * arrives in that window — Hume never signals "this flush is finished", so a
    * quiet socket is the only available end-of-segment marker.
    */
-  async next(timeoutMs?: number): Promise<TTSAudioChunk | Error | null | typeof IDLE> {
+  async next(timeoutMs?: number): Promise<TTSAudioChunk | Error | null | typeof IDLE | typeof WOKE> {
     if (this._items.length > 0) return this._items.shift()!;
 
     if (timeoutMs === undefined) {
@@ -128,10 +370,11 @@ class AudioChunkQueue {
     if (timer) clearTimeout(timer);
     this._resolve = null;
 
-    // An empty queue here means wake() released the wait without delivering
-    // anything. Treat it as IDLE: shifting an empty array would hand the drain
-    // loop an `undefined` it would mistake for an audio chunk.
-    if (!gotItem || this._items.length === 0) return IDLE;
+    if (!gotItem) return IDLE;
+    // Released with an empty queue: wake() was called. That is NOT a quiet
+    // socket — see WOKE. (Shifting the empty array would also hand the drain
+    // loop an `undefined` it would mistake for an audio chunk.)
+    if (this._items.length === 0) return WOKE;
     return this._items.shift()!;
   }
 }
@@ -184,10 +427,13 @@ const TAIL_IDLE_MS = 800;
  * it yet. Covers Hume's measured 380ms warm / 920ms cold first-audio time with
  * room to spare, which is what stops the last sentence being cut off.
  *
- * This is deliberately separate from TAIL_IDLE_MS: once audio is flowing, a
- * short silence means the reply is finished and the turn should end promptly.
- * Waiting the long window on every turn — which an earlier version did by
- * accident — just adds dead time before the agent listens again.
+ * Also the allowance for a silence BETWEEN snippets while the end of the reply
+ * is known to be unspoken (see ReplyCoverage). Measured gaps between snippets
+ * of one flush are 50-410ms; this only elapses if Hume has genuinely stalled.
+ *
+ * Neither case adds dead time to a normal turn: a reply now ends the moment
+ * its last snippet closes, not after a quiet period. TAIL_IDLE_MS remains only
+ * as the fallback if Hume ever stops echoing snippet text.
  */
 const PENDING_AUDIO_IDLE_MS = 2500;
 
@@ -237,12 +483,12 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
   private requestCounter = 0;
 
   constructor(
-    ttsInstance: tts.TTS,
+    private readonly owner: HumeTTS,
     private readonly humeSession: HumeTTSSession,
     connOptions?: APIConnectOptions,
     private readonly timer?: VoiceTurnTimer,
   ) {
-    super(ttsInstance, connOptions);
+    super(owner, connOptions);
     // Delivery is claimed in run(), NOT here. Claiming in the constructor meant
     // a stream that was merely CREATED — a speculative preemptive-TTS stream,
     // or the replacement after a barge-in — stole audio from the stream that
@@ -284,33 +530,82 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
     const segmentId = String(++this.segmentCounter);
     const requestId = String(this.requestCounter++);
 
+    // A reply synthesised ahead of its moderation verdict (see Presynthesis).
+    // Its text arrives here in one burst once the verdict has passed, so read
+    // the whole input first and adopt only if it is the same reply. Nothing is
+    // sent to Hume while deciding; if it is not adopted, the text is replayed
+    // into the normal path below, which only generates at its flush anyway.
+    const pre = this.owner.takePresynthesis();
+    let adopted: Presynthesis | null = null;
+    let replay: Array<string | typeof REPLAY_END> | null = null;
+    let presynth = "none";
+    if (pre) {
+      const items: string[] = [];
+      let sawEnd = false;
+      for await (const item of this.input) {
+        if (this.abortSignal.aborted) break;
+        if (typeof item === "string") {
+          items.push(item);
+          continue;
+        }
+        sawEnd = true;
+        break;
+      }
+      if (sawEnd && !this.abortSignal.aborted && (await pre.adopt(items.join("")))) {
+        adopted = pre;
+        presynth = "adopted";
+      } else {
+        pre.discard();
+        presynth = this.abortSignal.aborted ? "aborted" : sawEnd ? `refused:${pre.refusal}` : "no-end";
+      }
+      replay = sawEnd ? [...items, REPLAY_END] : items;
+    }
+
     // One turn per stream: the framework builds a fresh SynthesizeStream for
     // each reply. Clearing here means no turn can inherit a stale item, and
     // beginTurn() clears any leftover discard flag from a barge-in.
     this.audioQueue.clear();
-    let token = this.humeSession.beginTurn();
-    this.humeSession.setCallbacks({
-      onAudioChunk: (chunk) => this.audioQueue.put(chunk),
-      onError: (err) => {
-        logger.error({ err }, "hume-tts-plugin: audio error");
-        this.audioQueue.put(err);
-      },
-      onClose: () => {
-        // Socket dropped mid-turn; wake the drain loop so it doesn't hang.
-        // ensureConnected() reopens on the next turn.
-        this.audioQueue.put(null);
-      },
-    });
+    // Where this turn's audio arrives: its own queue, or the adopted one that
+    // has been collecting Hume's audio since the early flush.
+    const activeQueue = adopted ? adopted.queue : this.audioQueue;
+    // An interruption must be acted on at once, not whenever the next chunk or
+    // idle timeout happens to wake the drain loop: until this turn abandons the
+    // socket, anything it left in Hume's buffer is waiting to be glued onto the
+    // next reply.
+    this.abortSignal.addEventListener("abort", () => activeQueue.wake(), { once: true });
+    let token = adopted ? adopted.token : this.humeSession.beginTurn();
+    if (!adopted) {
+      this.humeSession.setCallbacks({
+        onAudioChunk: (chunk) => this.audioQueue.put(chunk),
+        onError: (err) => {
+          logger.error({ err }, "hume-tts-plugin: audio error");
+          this.audioQueue.put(err);
+        },
+        onClose: () => {
+          // Socket dropped mid-turn; wake the drain loop so it doesn't hang.
+          // ensureConnected() reopens on the next turn.
+          this.audioQueue.put(null);
+        },
+      });
+    }
 
     let textDone = false;
     let spokenSoFar = "";
 
-    // Audio accounting. `flushed` holds the text of every flush whose snippet
-    // has not come back yet, oldest first: it is both how we know audio is
-    // still owed, and exactly what has to be re-sent if the socket dies.
-    // Retained ONLY so a socket death knows what was never spoken. It is
-    // deliberately not used to decide when the turn is over — see TAIL_IDLE_MS.
-    const flushed: string[] = [];
+    // What Hume has finished speaking, snippet by snippet. This is what decides
+    // that the reply is over — see ReplyCoverage.
+    const coverage = new ReplyCoverage();
+    // Whether a snippet closed after the flush. Only consulted if Hume ever
+    // stops echoing snippet text, as the fallback end-of-reply signal.
+    let lastChunkSinceFlush = false;
+    // Audio Hume still owes this reply: the flush has gone out and the end of
+    // the reply has not been spoken. Decides whether an early exit must arm the
+    // discard guard, and what a socket death has to re-send.
+    const outstandingSnippets = (): number => {
+      if (flushCount === 0) return 0;
+      const done = coverage.known ? coverage.complete() : lastChunkSinceFlush;
+      return done ? 0 : 1;
+    };
     let reconnectsUsed = 0;
     let flushCount = 0;
     let framesEmitted = 0;
@@ -325,16 +620,32 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
     let sawLastChunk = false;
     let exitReason = "unknown";
     let firstFrameAt = 0;
+    let audioSamples = 0;
     // Chunks received since the most recent flush. Zero means Hume owes us
     // audio it has not started sending.
     let audioSinceLastFlush = 0;
 
     // ── Task A: text → Hume, flushing at sentence boundaries ─────────────────
     const feedText = async (): Promise<void> => {
+      if (adopted) {
+        // Already sent and flushed by the presynthesis — the one flush of this
+        // reply. Record what Hume owes and let the drain loop play it.
+        spokenSoFar = (replay ?? []).filter((x): x is string => typeof x === "string").join("");
+        tLastText = tStart;
+        tFlush = adopted.flushedAt;
+        coverage.setExpected(adopted.text);
+        flushCount = 1;
+        textDone = true;
+        activeQueue.wake();
+        return;
+      }
       let unflushed = "";
       let everFlushed = false;
+      const source: AsyncIterable<string | typeof REPLAY_END | symbol> = replay
+        ? (async function* () { yield* replay; })()
+        : this.input;
       try {
-        for await (const item of this.input) {
+        for await (const item of source) {
           if (this.abortSignal.aborted) break;
 
           if (typeof item === "string") {
@@ -349,10 +660,11 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
           // FLUSH_SENTINEL — the reply is complete. This is the ONLY flush.
           if (unflushed.trim().length > 0 || !everFlushed) {
             tFlush = Date.now();
+            coverage.setExpected(spokenSoFar);
             this.humeSession.flush(token);
-            flushed.push(unflushed);
             flushCount++;
             audioSinceLastFlush = 0;
+            lastChunkSinceFlush = false;
             everFlushed = true;
           }
           unflushed = "";
@@ -361,18 +673,22 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
         textDone = true;
         // Wake the drain loop so it re-evaluates its exit condition instead of
         // sitting out a full idle window.
-        this.audioQueue.wake();
+        activeQueue.wake();
       }
     };
 
     // ── Task B: Hume audio → the caller ──────────────────────────────────────
     const drainAudio = async (): Promise<void> => {
-      // `final` must mark the last frame of the turn, so hold one chunk back:
-      // emit it only once the next arrives (not final) or the turn ends (final).
-      let held: TTSAudioChunk | null = null;
+      // Frames go out the moment they arrive. This used to hold one chunk back so
+      // the true last frame could carry `final: true` — but LiveKit reads `final`
+      // only to emit per-segment METRICS (tts.js), and emits them again at end of
+      // stream regardless, so nothing audible depends on it. Measured, Hume's
+      // first two real chunks arrive 116-176ms apart, so the hold-back delayed
+      // the first word of every reply by that much for a metrics flag.
       let isFirstChunk = true;
       let receivedAny = false;
-      let waitedForFirst = 0;
+      // Quiet time spent waiting for Hume to START answering the flush.
+      let waitedForFlushAudio = 0;
 
       const emit = (chunk: TTSAudioChunk, final: boolean): void => {
         // V-03: first audio of the reply reaching the caller — the end of the
@@ -395,12 +711,12 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
       while (true) {
         if (this.abortSignal.aborted) {
           exitReason = "aborted";
-          // Emit the held chunk before leaving. The one-chunk lookahead always
-          // has the most recent audio in hand, and dropping it here removed the
-          // tail of the final word — "laptop" arriving as "lapt".
-          if (held) emit(held, true);
-          held = null;
-          this.humeSession.cancelTurn(token, flushed.length);
+          // Nothing is held back any more, so every frame received has already
+          // been emitted — the tail of the final word cannot be dropped here
+          // (it once was: "laptop" arriving as "lapt").
+          // Discard exactly what Hume has not finished speaking — nothing if
+          // the reply had already arrived in full (see abandonTurn()).
+          this.humeSession.abandonTurn(token);
           break;
         }
 
@@ -409,40 +725,84 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
         // sitting out the first-audio timeout for a turn that will never come.
         if (!this.humeSession.isOwner(token)) {
           exitReason = "superseded";
-          if (held) emit(held, true);
-          held = null;
+          break;
+        }
+
+        // The reply is over when Hume has spoken through to the end of the
+        // text — not when the socket goes quiet. Ending here, the moment the
+        // last snippet closes, also stops the turn sitting out a quiet period
+        // it no longer needs.
+        if (textDone && flushCount > 0 && coverage.known && coverage.complete()) {
+          exitReason = "complete";
+          break;
+        }
+        // Nothing was ever sent (an empty reply): no audio is coming.
+        if (textDone && flushCount > 0 && coverage.expectedChars === 0) {
+          exitReason = "empty-reply";
           break;
         }
 
         // Before the text is done, a quiet socket just means the model has not
-        // written the next sentence yet. After it, how long to wait depends on
-        // whether Hume has started answering the last flush: nothing yet means
-        // audio is still coming and cutting here would lose the final sentence.
+        // written the next sentence yet. After it, silence is only an ending
+        // signal once Hume has started answering the FLUSH — audio from a
+        // snippet it began on its own before the flush does not count.
+        //   no audio since the flush  -> Hume has not started; keep waiting
+        //   audio, reply text unspoken -> between snippets; allow a long gap
+        //   (fallback) no snippet text -> the old quiet-period rule
         const idleWindow = !textDone
           ? SEGMENT_IDLE_MS
-          : audioSinceLastFlush === 0
+          : audioSinceLastFlush === 0 || coverage.known
             ? PENDING_AUDIO_IDLE_MS
             : TAIL_IDLE_MS;
-        const next = await this.audioQueue.next(idleWindow);
+        const next = await activeQueue.next(idleWindow);
+
+        // The text side finished (or something else changed): look again with
+        // the new state. This is not silence — see WOKE.
+        if (next === WOKE) continue;
 
         if (next === IDLE) {
           // Quiet socket only ends the turn once the text is finished. Before
           // that it just means the model has not produced the next sentence
           // yet, which must not be mistaken for the end of the reply.
           if (!textDone) continue;
-          if (!receivedAny) {
-            waitedForFirst += idleWindow;
-            if (waitedForFirst < FIRST_AUDIO_TIMEOUT_MS) continue;
-            // A reply that produced NO audio at all. This is the silent-reply
-            // symptom, reported unambiguously rather than inferred.
-            logger.error(
-              { waitedMs: waitedForFirst, flushes: flushCount, chars: spokenSoFar.length },
-              "hume-tts-plugin: SILENT REPLY — text was flushed but Hume returned no audio",
-            );
+          if (audioSinceLastFlush === 0 && flushCount > 0) {
+            waitedForFlushAudio += idleWindow;
+            if (waitedForFlushAudio < FIRST_AUDIO_TIMEOUT_MS) continue;
+            if (!receivedAny) {
+              // A reply that produced NO audio at all. This is the silent-reply
+              // symptom, reported unambiguously rather than inferred.
+              logger.error(
+                { waitedMs: waitedForFlushAudio, flushes: flushCount, chars: spokenSoFar.length },
+                "hume-tts-plugin: SILENT REPLY — text was flushed but Hume returned no audio",
+              );
+            } else {
+              logger.error(
+                {
+                  waitedMs: waitedForFlushAudio,
+                  spokenChars: coverage.spokenChars,
+                  expectedChars: coverage.expectedChars,
+                },
+                "hume-tts-plugin: TRUNCATED REPLY — Hume never answered the flush after a pre-flush snippet",
+              );
+            }
+            exitReason = receivedAny ? "flush-unanswered" : "no-audio-timeout";
+            break;
           }
-          exitReason = receivedAny ? "idle-after-audio" : "no-audio-timeout";
-          if (held) emit(held, true);
-          held = null;
+          if (coverage.known) {
+            // Audio flowed after the flush, then stopped for a long time with
+            // the end of the reply still unspoken.
+            logger.error(
+              {
+                quietMs: idleWindow,
+                spokenChars: coverage.spokenChars,
+                expectedChars: coverage.expectedChars,
+              },
+              "hume-tts-plugin: TRUNCATED REPLY — Hume went quiet before the end of the reply was spoken",
+            );
+            exitReason = "stalled-incomplete";
+            break;
+          }
+          exitReason = "idle-after-audio";
           break;
         }
 
@@ -452,14 +812,14 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
           // swallow the rest of the sentence. Reconnect and re-send what was
           // never spoken — once. A second failure is a real outage, and looping
           // on it would just stall the turn.
-          const unspoken = flushed.join("");
+          const unspoken = outstandingSnippets() > 0 ? coverage.unspokenSuffix(spokenSoFar) : "";
           const recoverable =
             unspoken.trim().length > 0 && !this.abortSignal.aborted && reconnectsUsed < 1;
 
           if (recoverable) {
             reconnectsUsed++;
             logger.warn(
-              { unspokenChars: unspoken.length, segments: flushed.length },
+              { unspokenChars: unspoken.length, replyChars: spokenSoFar.length },
               "hume-tts-plugin: socket died mid-reply — reconnecting and re-sending unspoken text",
             );
             try {
@@ -468,18 +828,19 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
               // re-sending or the guard would drop our own text.
               const retryToken = this.humeSession.beginTurn();
               this.humeSession.setCallbacks({
-                onAudioChunk: (chunk) => this.audioQueue.put(chunk),
-                onError: (err) => this.audioQueue.put(err),
-                onClose: () => this.audioQueue.put(null),
+                onAudioChunk: (chunk) => activeQueue.put(chunk),
+                onError: (err) => activeQueue.put(err),
+                onClose: () => activeQueue.put(null),
               });
               this.humeSession.sendText(unspoken, retryToken);
               this.humeSession.flush(retryToken);
-              // Everything outstanding went back as ONE flush, so the
-              // accounting has to collapse to one entry too — otherwise the
-              // leftover entries would never clear and the turn would always
-              // end on the slow path with a false truncation warning.
-              flushed.length = 0;
-              flushed.push(unspoken);
+              // What is owed now is exactly the re-sent text, as ONE flush on a
+              // fresh socket.
+              coverage.setExpected(unspoken);
+              coverage.resetSpoken();
+              audioSinceLastFlush = 0;
+              lastChunkSinceFlush = false;
+              waitedForFlushAudio = 0;
               token = retryToken;
               continue;
             } catch (err) {
@@ -492,33 +853,37 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
             );
           }
 
-          if (held) emit(held, true);
-          held = null;
           break;
         }
 
         receivedAny = true;
-        audioSinceLastFlush++;
-        if (next.isLastChunk) sawLastChunk = true;
-        // A completed snippet means that much text is spoken and no longer
-        // needs re-sending if the socket dies.
-        if (next.isLastChunk) flushed.shift();
-        if (held) emit(held, false);
-        held = next;
+        if (next.snippetText !== undefined) coverage.known = true;
+        if (flushCount > 0) audioSinceLastFlush++;
+        if (next.isLastChunk) {
+          sawLastChunk = true;
+          if (flushCount > 0) lastChunkSinceFlush = true;
+          // A closed snippet means that much of the reply has been spoken.
+          coverage.snippetFinished(next.snippetId, next.snippetText);
+        }
+        if (next.pcm.length > 0) {
+          audioSamples += next.pcm.length;
+          emit(next, false);
+        }
       }
     };
 
     await Promise.all([feedText(), drainAudio()]);
 
-    // Snippets still outstanding means Hume is STILL generating audio for this
-    // reply that nobody is going to read. Left alone it arrives during the next
-    // turn and is played as part of the next reply. Abandon it explicitly.
-    if (flushed.length > 0) {
+    // Audio still owed means Hume is STILL generating this reply and nobody is
+    // going to read it. Left alone it arrives during the next turn and is
+    // played as part of the next reply. Abandon it explicitly.
+    const outstanding = this.abortSignal.aborted ? 0 : outstandingSnippets();
+    if (outstanding > 0) {
       logger.warn(
-        { outstanding: flushed.length },
+        { outstanding, spokenChars: coverage.spokenChars, expectedChars: coverage.expectedChars },
         "hume-tts-plugin: turn ended with audio still generating — abandoning it so it cannot leak into the next reply",
       );
-      this.humeSession.discardPending(token, flushed.length);
+      this.humeSession.abandonTurn(token);
     }
 
     // One line per reply, so "the voice was not audible" is a fact in the log
@@ -529,7 +894,7 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
         frames: framesEmitted,
         flushes: flushCount,
         chars: spokenSoFar.length,
-        unspokenSegments: flushed.length,
+        unspokenSegments: outstanding,
         aborted: this.abortSignal.aborted,
         // Where the TTS stage's time actually goes:
         //   text_ms  — waiting for the model to finish writing the reply
@@ -538,10 +903,20 @@ class HumeSynthesizeStream extends tts.SynthesizeStream {
         text_ms: tLastText ? tLastText - tStart : null,
         flush_ms: tFlush && tLastText ? tFlush - tLastText : null,
         hume_ms: tFlush && firstFrameAt ? firstFrameAt - tFlush : null,
+        // How much speech was produced, and how much of the reply's text Hume
+        // reported as spoken. spoken_chars < expected_chars on a finished turn
+        // is a reply that lost words.
+        audio_ms: Math.round((audioSamples / TTS_OUTPUT_SAMPLE_RATE) * 1000),
+        spoken_chars: coverage.spokenChars,
+        expected_chars: coverage.expectedChars,
         // "no" here on a completed turn means we ended before Hume said it was
         // finished — which is what a clipped final word looks like.
         saw_last_chunk: sawLastChunk,
         exit: exitReason,
+        // "adopted": synthesis started before the moderation verdict, and
+        // presynth_lead_ms is how much earlier than this stream it began.
+        presynth,
+        presynth_lead_ms: adopted ? tStart - adopted.flushedAt : null,
       },
       framesEmitted === 0 ? "hume-tts-plugin: reply produced NO audio" : "hume-tts-plugin: reply spoken",
     );
@@ -593,10 +968,8 @@ class HumeChunkedStream extends tts.ChunkedStream {
     this.session.flush(token);
 
     let isFirstChunk = true;
-    // Same one-chunk lookahead as the streaming path: isLastChunk ends a
-    // snippet, not the flush, so `final` can only be set once the segment is
-    // known to be over.
-    let held: TTSAudioChunk | null = null;
+    // No hold-back, for the same reason as the streaming path: `final` only
+    // drives LiveKit's metrics, so frames are emitted as they arrive.
     let snippetEnded = false;
 
     const emit = (chunk: TTSAudioChunk, final: boolean): void => {
@@ -612,22 +985,13 @@ class HumeChunkedStream extends tts.ChunkedStream {
 
     while (!this.abortSignal.aborted) {
       // Superseded by a later turn — stop rather than consume its audio.
-      if (!this.session.isOwner(token)) {
-        if (held) emit(held, true);
-        held = null;
-        break;
-      }
+      if (!this.session.isOwner(token)) break;
 
       const next = await audioQueue.next(snippetEnded ? SEGMENT_IDLE_MS : undefined);
 
-      if (next === IDLE || next === null || next instanceof Error) {
-        if (held) emit(held, true);
-        held = null;
-        break;
-      }
+      if (next === IDLE || next === WOKE || next === null || next instanceof Error) break;
 
-      if (held) emit(held, false);
-      held = next;
+      if (next.pcm.length > 0) emit(next, false);
       if (next.isLastChunk) snippetEnded = true;
     }
 

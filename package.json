@@ -12,8 +12,10 @@
     "typecheck": "tsc --noEmit",
     "check:prompt": "tsx src/checks/prompt.check.ts",
     "check:auth": "tsx src/checks/auth.check.ts",
+    "check:account-linking": "tsx src/checks/account-linking.check.ts",
     "check:routes": "tsx src/checks/routes.check.ts",
     "check:studio": "tsx src/checks/studio.check.ts",
+    "check:character-guards": "tsx src/checks/character-guards.check.ts",
     "check:outreach": "tsx src/checks/outreach.check.ts",
     "check:adaptation": "tsx src/checks/adaptation.check.ts",
     "check:activity": "tsx src/checks/activity.check.ts",
@@ -26,7 +28,10 @@
     "setup:db": "tsx src/scripts/setup-db.ts",
     "purge:studio-memories": "tsx src/scripts/purge-studio-memories.ts",
     "grant:entitlement": "tsx src/scripts/grant-entitlement.ts",
-    "latency-report": "tsx src/scripts/latency-report.ts"
+    "merge:accounts": "tsx src/scripts/merge-accounts.ts",
+    "latency-report": "tsx src/scripts/latency-report.ts",
+    "voice-e2e": "tsx src/scripts/voice-e2e-latency.ts",
+    "voice:samples": "tsx src/scripts/voice-samples.ts"
   },
   "dependencies": {
     "@deepgram/sdk": "^4.11.3",

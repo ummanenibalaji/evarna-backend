@@ -355,6 +355,14 @@ export function describeProsody(scores?: Record<string, unknown> | null): string
 // Prompt order: system persona → companion identity → personalization →
 //               honesty → memory block → usage summary → compressed older turns →
 //               verbatim recent turns → how they sounded → user message
+//
+// With `memoryLast` (the voice path), the memory block moves to just after the
+// verbatim turns instead, ahead of "how they sounded". Memories are retrieved
+// for each new message, so they change every turn; anything placed AFTER them
+// cannot be reused from a local model's prompt cache. In front of the history,
+// they forced the whole conversation to be re-read on every turn — measured
+// with a 10-line memory block, first token went 532ms → 1179ms over six turns;
+// after the history it held at ~510ms. Same content, same instructions.
 export function assemblePrompt(
   persona: IPersonaConfig,
   identity: CompanionIdentity,
@@ -364,6 +372,7 @@ export function assemblePrompt(
   usageSummary?: string | null,
   personalization?: UserPersonalizationContext | null,
   prosody?: Record<string, unknown> | null,
+  { memoryLast = false }: { memoryLast?: boolean } = {},
 ): AssembledPrompt {
   const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
 
@@ -376,7 +385,7 @@ export function assemblePrompt(
 
   messages.push({ role: "system", content: HONESTY_BLOCK });
 
-  if (memoryBlock) {
+  if (memoryBlock && !memoryLast) {
     messages.push({ role: "system", content: memoryBlock });
   }
 
@@ -396,6 +405,10 @@ export function assemblePrompt(
       role: turn.role as "user" | "assistant",
       content: turn.content,
     });
+  }
+
+  if (memoryBlock && memoryLast) {
+    messages.push({ role: "system", content: memoryBlock });
   }
 
   // Directly before the message it describes, so it reads as being about this

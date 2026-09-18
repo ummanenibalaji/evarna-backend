@@ -80,6 +80,26 @@ export function takeMemoryPrefetch(sessionId: string): Promise<string> | null {
   return entry.promise;
 }
 
+/**
+ * Run one retrieval as the call connects, purely to warm the path.
+ *
+ * The first retrieval in a worker process pays for a fresh HTTPS connection to
+ * the embeddings API and a cold Atlas vector search: measured ~1,000ms cold
+ * against ~350-400ms warm. The first turn of a call often has no interim
+ * prefetch to lean on (an opening "Hey." is under MIN_QUERY_WORDS), so it ran
+ * its own retrieval cold, blew the 600ms deadline, and answered with no
+ * memories at all after waiting the full 600ms.
+ *
+ * The result is discarded — it answers no question the caller asked — and
+ * nothing is recorded as accessed.
+ */
+export function warmMemoryRetrieval(characterId: string, userId: string): void {
+  const started = Date.now();
+  void retrieveMemories(characterId, userId, "catching up on how things have been", { recordAccess: false })
+    .then(() => logger.debug({ characterId, ms: Date.now() - started }, "voice: memory retrieval path warmed"))
+    .catch(() => {});
+}
+
 /** Drop a session's prefetch. Called when its call ends. */
 export function clearMemoryPrefetch(sessionId: string): void {
   prefetches.delete(sessionId);
