@@ -1207,21 +1207,36 @@ async function runUsageLimitChecks(
     await getRedis().del(dayKey);
   }
 
-  // Companions: filler rows up to the cap, then one more is refused.
-  const filler = await Character.collection.insertMany(
-    Array.from({ length: USAGE_LIMITS.companions }, () => ({
-      user_id: otherUserId, mode: "companion", is_active: true, name: "[smoke] cap filler",
-    })),
-  );
+  // Companions. The other account never finished onboarding, so it is refused
+  // before the cap is counted — it has never been asked its age.
+  const early = await api("POST", "/characters/create", otherToken, {
+    archetype: "mentor", gender: "female", voice_id: VOICE_MENTOR, name: "Too early",
+  });
+  assert.equal(early.status, 409, `an account that never onboarded created a companion (${early.status})`);
+  assert.equal(early.json.code, "NOT_ONBOARDED");
+  ok("an account that skipped onboarding cannot create a companion");
+
+  // Marked onboarded directly for the cap check, then put back: filler rows up
+  // to the cap, then one more is refused.
+  await User.updateOne({ _id: otherUserId }, { $set: { onboarding_completed: true } });
   try {
-    const over = await api("POST", "/characters/create", otherToken, {
-      archetype: "mentor", gender: "female", voice_id: "any", name: "One too many",
-    });
-    assert.equal(over.status, 403, "a companion over the cap was created");
-    assert.equal(over.json.code, "COMPANION_LIMIT_REACHED");
-    ok(`a user cannot create more than ${USAGE_LIMITS.companions} companions`);
+    const filler = await Character.collection.insertMany(
+      Array.from({ length: USAGE_LIMITS.companions }, () => ({
+        user_id: otherUserId, mode: "companion", is_active: true, name: "[smoke] cap filler",
+      })),
+    );
+    try {
+      const over = await api("POST", "/characters/create", otherToken, {
+        archetype: "mentor", gender: "female", voice_id: "any", name: "One too many",
+      });
+      assert.equal(over.status, 403, "a companion over the cap was created");
+      assert.equal(over.json.code, "COMPANION_LIMIT_REACHED");
+      ok(`a user cannot create more than ${USAGE_LIMITS.companions} companions`);
+    } finally {
+      await Character.deleteMany({ _id: { $in: Object.values(filler.insertedIds) } });
+    }
   } finally {
-    await Character.deleteMany({ _id: { $in: Object.values(filler.insertedIds) } });
+    await User.updateOne({ _id: otherUserId }, { $set: { onboarding_completed: false } });
   }
 
   // Calls: concurrent calls, then daily minutes, then the EVI path mid-call.

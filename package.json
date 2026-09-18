@@ -15,6 +15,7 @@
     "check:account-linking": "tsx src/checks/account-linking.check.ts",
     "check:routes": "tsx src/checks/routes.check.ts",
     "check:studio": "tsx src/checks/studio.check.ts",
+    "check:character-guards": "tsx src/checks/character-guards.check.ts",
     "check:outreach": "tsx src/checks/outreach.check.ts",
     "check:adaptation": "tsx src/checks/adaptation.check.ts",
     "check:activity": "tsx src/checks/activity.check.ts",
