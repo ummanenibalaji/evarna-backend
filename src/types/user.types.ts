@@ -4,9 +4,17 @@ export type UserGender = "male" | "female" | "nonbinary" | "undisclosed";
 export type CommunicationStyle = "warm" | "direct" | "funny" | "calm";
 export type AuthProvider = "google" | "apple" | "email";
 
+/** An additional sign-in method linked to an account. */
+export interface LinkedIdentity {
+  provider: AuthProvider;
+  sub: string;
+  linked_at: Date;
+}
+
 export interface IUser {
   auth_provider: AuthProvider;
   provider_sub: string;
+  linked_identities?: LinkedIdentity[];
   email: string | null;
   token_version: number;
   // Optional until onboarding completes — sign-in creates the user first.
