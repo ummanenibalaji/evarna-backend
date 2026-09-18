@@ -28,7 +28,8 @@ import { Character } from "../models/character.model.js";
 import { Session } from "../models/session.model.js";
 import { ConversationTurn } from "../models/conversation-turn.model.js";
 import { streamConversation } from "../services/conversation.service.js";
-import type { ConversationEvent } from "../services/conversation.service.js";
+import type { ConversationEvent, SpeculativeSynthesis } from "../services/conversation.service.js";
+import { getOpenAI } from "../config/openai.js";
 
 const PREFIX = "voice-latency-check";
 const USER_ID = new Types.ObjectId().toString();
@@ -50,7 +51,12 @@ interface TurnResult {
   outputTokens: number;
 }
 
-async function runTurn(sessionId: string, characterId: string, message: string): Promise<TurnResult> {
+async function runTurn(
+  sessionId: string,
+  characterId: string,
+  message: string,
+  speculativeSynthesis?: SpeculativeSynthesis,
+): Promise<TurnResult> {
   const events: ConversationEvent[] = [];
   const chunks: string[] = [];
   const crisis: string[] = [];
@@ -62,6 +68,7 @@ async function runTurn(sessionId: string, characterId: string, message: string):
     userId: USER_ID,
     message,
     isVoiceMode: true,
+    ...(speculativeSynthesis ? { speculativeSynthesis } : {}),
   })) {
     events.push(event);
     if (event.type === "chunk") chunks.push(event.content);
@@ -224,6 +231,101 @@ async function main(): Promise<void> {
       ok("the turn is persisted for memory extraction");
     } catch (err) {
       fail("the turn is persisted for memory extraction", err);
+    }
+    // ── 4. speculative synthesis ─────────────────────────────────────────────
+    // Synthesis may start before the verdict (Presynthesis). What must hold is
+    // that the SAFETY outcome is identical: nothing is emitted before the
+    // verdict, a crisis verdict still yields only the crisis response, and
+    // anything synthesised early is discarded. The verdict is delayed (or
+    // replaced) so that it deliberately lands AFTER generation has finished —
+    // the only case in which synthesis starts early.
+    console.log("\n▸ 4. synthesis started before the verdict never makes anything audible early");
+    const moderations = getOpenAI().moderations;
+    const realCreate = moderations.create.bind(moderations);
+    const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+    const setModeration = (fn: (body: { input: unknown }) => Promise<unknown>): void => {
+      (moderations as unknown as { create: unknown }).create = fn;
+    };
+    const verdict = (flagged: boolean, selfHarm: number) => ({
+      results: [{ flagged, categories: { "self-harm": selfHarm > 0.5 }, category_scores: { "self-harm": selfHarm } }],
+    });
+    const sink = (): SpeculativeSynthesis & { calls: string[]; begun: string[] | null } => {
+      const s = {
+        calls: [] as string[],
+        begun: null as string[] | null,
+        begin(chunks: readonly string[]) { s.calls.push("begin"); s.begun = [...chunks]; },
+        discard() { s.calls.push("discard"); },
+      };
+      return s;
+    };
+    const specCheck = async (label: string, fn: () => Promise<void>): Promise<void> => {
+      try { await fn(); ok(label); } catch (err) { fail(label, err); }
+    };
+
+    try {
+      // a) The real crisis message, its real verdict delivered late.
+      setModeration(async (body) => { await sleep(8000); return realCreate(body as never); });
+      const sA = sink();
+      const crisisSpecSession = await mkSession();
+      const tA = await runTurn(crisisSpecSession, characterId,
+        "I don't want to be alive anymore. I've been thinking about killing myself.", sA);
+      await specCheck("late crisis verdict: the crisis response is still the FIRST and ONLY thing emitted", async () => {
+        assert.equal(tA.firstEventType, "crisis");
+        assert.equal(tA.chunks.length, 0, `${tA.chunks.length} generated chunk(s) were emitted`);
+        assert.ok(tA.crisis.join("").includes("988"));
+      });
+      await specCheck("late crisis verdict: the early synthesis was started and then discarded", async () => {
+        assert.deepEqual(sA.calls, ["begin", "discard"], `sink calls: ${JSON.stringify(sA.calls)}`);
+      });
+      await specCheck("late crisis verdict: still persisted as a safety record", async () => {
+        const rows = await ConversationTurn.countDocuments({ session_id: new Types.ObjectId(crisisSpecSession) });
+        assert.equal(rows, 2, `found ${rows}`);
+      });
+
+      // b) Moderation unreachable: fail-safe crisis, exactly as before.
+      setModeration(async () => { await sleep(5000); throw new Error("simulated moderation outage"); });
+      const sB = sink();
+      const tB = await runTurn(await mkSession(), characterId, "Hey, how was your day?", sB);
+      await specCheck("moderation outage with a late failure: fail-safe crisis response, early synthesis discarded", async () => {
+        assert.equal(tB.firstEventType, "crisis");
+        assert.equal(tB.chunks.length, 0);
+        assert.deepEqual(sB.calls, ["begin", "discard"], `sink calls: ${JSON.stringify(sB.calls)}`);
+      });
+
+      // c) A crisis verdict that lands WHILE the model is still generating.
+      setModeration(async () => { await sleep(30); return verdict(true, 0.9); });
+      const sC = sink();
+      const tC = await runTurn(await mkSession(), characterId, "Tell me about your favourite place in the world.", sC);
+      await specCheck("crisis verdict mid-generation: crisis only, nothing synthesised early", async () => {
+        assert.equal(tC.firstEventType, "crisis");
+        assert.equal(tC.chunks.length, 0);
+        assert.deepEqual(sC.calls, [], `sink calls: ${JSON.stringify(sC.calls)}`);
+      });
+
+      // d) An ordinary message, verdict late: the early synthesis is of EXACTLY
+      // the text that is then released, and it is not discarded.
+      setModeration(async (body) => { await sleep(5000); return realCreate(body as never); });
+      const sD = sink();
+      const tD = await runTurn(await mkSession(), characterId, "Hey, I had a really long day at work today. How are you?", sD);
+      await specCheck("late ordinary verdict: the reply is released, and it is the text synthesised early", async () => {
+        assert.deepEqual(sD.calls, ["begin"], `sink calls: ${JSON.stringify(sD.calls)}`);
+        assert.equal(tD.firstEventType, "chunk");
+        assert.equal(tD.crisis.length, 0);
+        assert.equal(tD.chunks.join(""), (sD.begun ?? []).join(""), "released text differs from the synthesised text");
+        assert.ok(tD.events.some((e) => e.type === "done"));
+      });
+
+      // e) Flagged but not a crisis: proceeds, exactly as before.
+      setModeration(async () => { await sleep(5000); return verdict(true, 0.01); });
+      const sE = sink();
+      const tE = await runTurn(await mkSession(), characterId, "Ugh, I could scream at my landlord right now.", sE);
+      await specCheck("late flagged-but-not-crisis verdict: reply proceeds as before", async () => {
+        assert.equal(tE.crisis.length, 0);
+        assert.ok(tE.chunks.length > 0);
+        assert.deepEqual(sE.calls, ["begin"], `sink calls: ${JSON.stringify(sE.calls)}`);
+      });
+    } finally {
+      setModeration(realCreate as never);
     }
   } finally {
     await ConversationTurn.deleteMany({ user_id: USER_ID });

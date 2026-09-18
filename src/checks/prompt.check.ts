@@ -227,7 +227,39 @@ function checkProsodyDescription(): void {
   console.log("✓ tone of voice is described in words, only when clear, next to the message it belongs to");
 }
 
+function checkMemoryPlacement(): void {
+  const persona = getArchetypeConfig("bestfriend").persona_config;
+  const ctx: IRedisSessionContext = {
+    compressed_summary: "",
+    turns: [
+      { role: "user", content: "work was brutal" },
+      { role: "assistant", content: "that sounds exhausting" },
+    ],
+    total_token_count: 0,
+  } as IRedisSessionContext;
+  const memory = "[Known about this person]\n• their sister is getting married [episodic, 3d ago]";
+  const at = (m: { messages: Array<{ content: string }> }, needle: string): number =>
+    m.messages.findIndex((x) => x.content === needle || x.content.startsWith(needle));
+
+  // Default (text chat): unchanged — memories come before the conversation.
+  const text = assemblePrompt(persona, IDENTITY, ctx, "hi", memory, null, null, { Sadness: 0.7 });
+  assert.ok(at(text, memory) < at(text, "work was brutal"), "text chat: memories must stay before the history");
+
+  // Voice: after the history, so the history stays in the model's prompt
+  // cache; the tone block still sits directly before the message.
+  const voice = assemblePrompt(persona, IDENTITY, ctx, "hi", memory, null, null, { Sadness: 0.7 }, { memoryLast: true });
+  assert.ok(at(voice, memory) > at(voice, "that sounds exhausting"), "voice: memories must follow the history");
+  assert.ok(voice.messages.at(-2)!.content.includes("sadness"), "tone must still sit directly before the message");
+  assert.equal(voice.messages.at(-1)!.content, "hi");
+  assert.equal(voice.messages.length, text.messages.length, "moving memories must not add or drop anything");
+  // Everything before the first dynamic part is identical, so it can be cached.
+  const firstDynamic = at(text, memory);
+  assert.deepEqual(voice.messages.slice(0, firstDynamic), text.messages.slice(0, firstDynamic));
+  console.log("✓ voice places memories after the history (cacheable prefix); text chat unchanged");
+}
+
 checkPersonaBlockCarriesEveryRule();
+checkMemoryPlacement();
 checkHonestyIsAlwaysSent();
 checkProsodyDescription();
 checkCompanionKnowsItself();

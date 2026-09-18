@@ -29,7 +29,8 @@
     "purge:studio-memories": "tsx src/scripts/purge-studio-memories.ts",
     "grant:entitlement": "tsx src/scripts/grant-entitlement.ts",
     "merge:accounts": "tsx src/scripts/merge-accounts.ts",
-    "latency-report": "tsx src/scripts/latency-report.ts"
+    "latency-report": "tsx src/scripts/latency-report.ts",
+    "voice-e2e": "tsx src/scripts/voice-e2e-latency.ts"
   },
   "dependencies": {
     "@deepgram/sdk": "^4.11.3",

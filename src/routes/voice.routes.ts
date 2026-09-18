@@ -14,7 +14,7 @@ import { streamConversation } from "../services/conversation.service.js";
 import { User } from "../models/user.model.js";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
-import { assertCanStartCall, voiceSecondsRemaining, VOICE_LIMIT_LINE } from "../services/usage.service.js";
+import { assertCanStartCall, prefetchCallHistory, voiceSecondsRemaining, VOICE_LIMIT_LINE } from "../services/usage.service.js";
 
 // No user_id: the owner is whoever holds the token.
 const StartVoiceSessionSchema = z.object({
@@ -97,9 +97,17 @@ export async function voiceRoutes(app: FastifyInstance): Promise<void> {
     // The plan first, then the abuse ceiling. A voice minute is roughly $0.085
     // all-in and the largest variable cost in the product, so this is the one
     // refusal the app turns into a paywall rather than an apology.
-    const gate = await canStart(user_id, "voice");
+    //
+    // The two gates' database reads run in parallel — the app fires this
+    // request while the call screen slides in, so it is time-to-connect. The
+    // order of the DECISIONS is unchanged: the plan refusal still wins, and the
+    // abuse ceiling's rate-limit counter is only incremented once the plan has
+    // allowed the call, exactly as before.
+    const now = new Date();
+    const callHistory = prefetchCallHistory(user_id, now);
+    const gate = await canStart(user_id, "voice", now);
     if (!gate.allowed) return refuse(reply, gate);
-    await assertCanStartCall(user_id);
+    await assertCanStartCall(user_id, now, callHistory);
 
     const started = await createVoiceSession(user_id, parsed.data.character_id);
     if (!started.ok) return reply.status(started.status).send({ success: false, error: started.error });

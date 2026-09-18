@@ -11,10 +11,11 @@ import { env } from "../config/env.js";
 import { getConversationClient, getConversationModel, isLocalConversationModel } from "../config/openai.js";
 import { logger } from "../utils/logger.js";
 import { DEFAULT_VOICE_ID } from "../data/voices.js";
-import { HumeTTS } from "./hume-tts-plugin.js";
+import { HumeTTS, TTS_TEXT_TRANSFORMS } from "./hume-tts-plugin.js";
 import { CompanionLLM } from "./voice-llm.service.js";
 import { VoiceTurnTimer } from "./voice-metrics.service.js";
-import { primeMemoryPrefetch, clearMemoryPrefetch } from "./memory-prefetch.service.js";
+import { primeMemoryPrefetch, clearMemoryPrefetch, warmMemoryRetrieval } from "./memory-prefetch.service.js";
+import { warmVoicePrompt } from "./conversation.service.js";
 import { endSessionById } from "./session.service.js";
 import { voiceSecondsRemaining, VOICE_LIMIT_LINE } from "./usage.service.js";
 import { deleteRoom } from "./livekit-token.service.js";
@@ -28,13 +29,37 @@ const intFromEnv = (name: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 const VOICE_ENDPOINTING_MIN_MS = intFromEnv("VOICE_ENDPOINTING_MIN_MS", 300);
-const VOICE_ENDPOINTING_MAX_MS = intFromEnv("VOICE_ENDPOINTING_MAX_MS", 2500);
+// How long to wait when the turn detector thinks the caller is NOT finished.
+// Measured on real calls it was the single largest wait in the pipeline: 7 of
+// 15 turns ("I had a really long day at work and I'm completely drained."
+// scored 0.12-0.15 against a 0.56 threshold) sat ~1.9s after the caller
+// stopped with the reply already prepared. The detector's scores at genuine
+// sentence ends (0.08-0.15) sit close to its scores at a mid-sentence pause
+// (0.03), so the probability alone cannot safely tell them apart — the ceiling
+// is what protects a caller who pauses to think. 1500ms still outlasts a
+// mid-sentence pause of up to ~1.4s (verified: the 690ms pause in the reference
+// utterance, and the same utterance with its pause stretched to 1.0/1.2/1.4s,
+// each stay ONE turn) while committing those turns ~1s sooner. Raise it if
+// callers report being cut off while thinking.
+const VOICE_ENDPOINTING_MAX_MS = intFromEnv("VOICE_ENDPOINTING_MAX_MS", 1500);
 const VOICE_INTERRUPTION_MIN_WORDS = intFromEnv("VOICE_INTERRUPTION_MIN_WORDS", 2);
+// Silence the voice-activity detector needs before it reports that the caller
+// stopped. Silero's default is 550ms, and it runs BEFORE endpointing's own
+// minDelay — so every turn waited ~0.55s just to start the clock. Measured from
+// the caller's side, ~860ms elapsed between the last spoken frame and the
+// worker's speech-end. Default kept at the library's 550 so behaviour only
+// changes when this is set deliberately; lower values end turns sooner at the
+// risk of cutting off someone who pauses mid-sentence.
+const VOICE_VAD_MIN_SILENCE_MS = intFromEnv("VOICE_VAD_MIN_SILENCE_MS", 550);
 // Speculative TTS. Default OFF because it spends real money: audio is
 // synthesised before the turn is confirmed and thrown away whenever the caller
 // keeps talking, and TTS is ~85% of the per-minute voice cost. Set
 // VOICE_PREEMPTIVE_TTS=true to trade that spend for ~300-450ms off every turn.
 const VOICE_PREEMPTIVE_TTS = process.env["VOICE_PREEMPTIVE_TTS"] === "true";
+// Synthesise a reply that finished generating while its moderation verdict was
+// still out, holding the audio until the verdict passes (Presynthesis). On by
+// default; VOICE_PRESYNTHESIS=false restores "synthesis starts at the verdict".
+const VOICE_PRESYNTHESIS = process.env["VOICE_PRESYNTHESIS"] !== "false";
 
 
 const FALLBACK_PROMPT =
@@ -127,16 +152,30 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   // a few minutes, so loading it as the call connects means it is warm by the
   // time anyone speaks. Fire-and-forget: a failure here must not block the call,
   // it only costs the first turn its head start.
+  //
+  // With a resolved caller, the warm-up is THEIR prompt rather than "hi": that
+  // loads the model AND leaves the companion prompt in its cache, so the first
+  // turn evaluates only the caller's words (see warmVoicePrompt). The "hi"
+  // warm-up remains for the degraded path, which has no prompt to warm.
   if (isLocalConversationModel()) {
-    void getConversationClient()
-      .chat.completions.create({
-        model: getConversationModel(),
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 1,
-      })
-      .then(() => logger.info({ model: getConversationModel() }, "voice: local model warm"))
-      .catch((err) => logger.warn({ err }, "voice: local model warm-up failed"));
+    if (ids) {
+      void warmVoicePrompt(ids.sessionId, ids.characterId, ids.userId)
+        .catch((err) => logger.warn({ err }, "voice: local model prompt warm-up failed"));
+    } else {
+      void getConversationClient()
+        .chat.completions.create({
+          model: getConversationModel(),
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 1,
+        })
+        .then(() => logger.info({ model: getConversationModel() }, "voice: local model warm"))
+        .catch((err) => logger.warn({ err }, "voice: local model warm-up failed"));
+    }
   }
+
+  // Same idea for memory: the first retrieval of a process runs cold, and the
+  // first turn is the one most likely to have no interim prefetch.
+  if (ids) warmMemoryRetrieval(ids.characterId, ids.userId);
 
   // V-03: one timer per call. Stamped by the session events below, by
   // CompanionLLM on its first token, and by the Hume plugin on its first audio
@@ -144,7 +183,7 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   const timer = new VoiceTurnTimer(roomName);
 
   const humeTts = env.HUME_API_KEY
-    ? new HumeTTS(voiceId, timer)
+    ? new HumeTTS(voiceId, timer, TTS_TEXT_TRANSFORMS)
     : new openai.TTS({ model: "tts-1", voice: "shimmer", apiKey: env.OPENAI_API_KEY });
 
   // The real path: every turn goes through streamConversation(), so voice gets
@@ -152,14 +191,21 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
   // usage summary, Redis session context and ConversationTurn persistence.
   // Persisted turns are also what make memory extraction work for voice calls.
   const companionLlm = ids
-    ? new CompanionLLM(ids, timer)
+    ? new CompanionLLM(
+        ids,
+        timer,
+        VOICE_PRESYNTHESIS && humeTts instanceof HumeTTS ? humeTts : undefined,
+      )
     : new openai.LLM({ model: "gpt-4o-mini", apiKey: env.OPENAI_API_KEY });
 
   const session = new voice.AgentSession({
     stt: new deepgram.STT({ model: "nova-3", apiKey: env.DEEPGRAM_API_KEY }),
     llm: companionLlm,
     tts: humeTts,
-    vad: await silero.VAD.load(),
+    vad: await silero.VAD.load({ minSilenceDuration: VOICE_VAD_MIN_SILENCE_MS }),
+    // LiveKit's defaults, stated explicitly: Presynthesis must transform text
+    // exactly as this pipeline does, so both read the same list.
+    ttsTextTransforms: TTS_TEXT_TRANSFORMS,
 
     // V-04: turn-taking was left entirely at defaults. These ship with
     // @livekit/agents, cost nothing extra, and are the largest slice of the
@@ -177,7 +223,7 @@ export async function runVoicePipeline(ctx: JobContext): Promise<void> {
         minDelay: VOICE_ENDPOINTING_MIN_MS,
         // Default is 3000ms. The ceiling only applies to a caller who trails
         // off without a clear stop, and 3s of dead air is well past the point
-        // it reads as broken.
+        // it reads as broken. See VOICE_ENDPOINTING_MAX_MS for why 1500.
         maxDelay: VOICE_ENDPOINTING_MAX_MS,
       },
       interruption: {
